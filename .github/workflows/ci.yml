@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: lint and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { enable-cache: true }
+      - run: uv sync --frozen --extra dev --extra anthropic
+      - run: uv run ruff check .
+      - run: uv run pytest -q
+
+  gate-self-check:
+    name: eval gate has teeth
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { enable-cache: true }
+      - run: uv sync --frozen
+      # Fails the job if the naive baseline ever passes: a gate that accepts anything is not a gate.
+      - run: uv run deliveryops-eval --baseline-check
+
+  eval-gate:
+    name: eval gate (real model)
+    needs: gate-self-check
+    runs-on: ubuntu-latest
+    # Skipped on forks, where the secret is unavailable. Requires the check to be marked
+    # "required" in branch protection for it to actually block merges.
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    env:
+      DELIVERYOPS_LLM: anthropic
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      DELIVERYOPS_MODEL: ${{ vars.DELIVERYOPS_MODEL || 'claude-sonnet-4-6' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { enable-cache: true }
+      - run: uv sync --frozen --extra anthropic
+      - name: Refuse to run without an API key
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "ANTHROPIC_API_KEY is not set: add it as a repository secret." >&2
+            exit 1
+          fi
+      - run: uv run deliveryops-eval --judge --trials 3 --report eval-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: eval-report, path: eval-report.json }

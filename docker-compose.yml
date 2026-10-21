@@ -1,0 +1,51 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: deliveryops
+      POSTGRES_PASSWORD: deliveryops
+      POSTGRES_DB: deliveryops
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./src/deliveryops/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deliveryops"]
+      interval: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DELIVERYOPS_LLM: ${DELIVERYOPS_LLM:-fake}
+      DELIVERYOPS_MODEL: ${DELIVERYOPS_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DATABASE_URL: postgresql://deliveryops:deliveryops@db:5432/deliveryops
+      DELIVERYOPS_RETRIEVER: ${DELIVERYOPS_RETRIEVER:-pgvector}
+      DELIVERYOPS_EVAL_REPORT: /app/eval-report.json
+    ports: ["8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+      knowledge:
+        condition: service_completed_successfully
+
+  knowledge:
+    # One-shot ingestion of the process library into pgvector before the API starts.
+    build: .
+    command: ["deliveryops-knowledge"]
+    environment:
+      DATABASE_URL: postgresql://deliveryops:deliveryops@db:5432/deliveryops
+    depends_on:
+      db: {condition: service_healthy}
+
+  worker:
+    # Durable outbox delivery: gate notifications survive restarts.
+    build: .
+    command: ["deliveryops-worker"]
+    environment:
+      DATABASE_URL: postgresql://deliveryops:deliveryops@db:5432/deliveryops
+    depends_on:
+      db: {condition: service_healthy}
+
+volumes:
+  pgdata:
