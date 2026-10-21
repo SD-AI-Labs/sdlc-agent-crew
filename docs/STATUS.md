@@ -9,6 +9,7 @@ claim about intent.
 | | |
 | --- | --- |
 | Host | macOS 27.0.1, arm64 |
+| Repository | https://github.com/SD-AI-Labs/sdlc-agent-crew (public, `main`) |
 | Python | 3.12.13 (uv-managed venv at `.venv`) |
 | Package manager | uv 0.11.32, `uv.lock` committed |
 | Libraries | langgraph 1.2.16, langchain-core 1.6.12, mcp 2.3.0, fastapi 0.157.0, pydantic 2.14.1, anthropic 1.17.0 |
@@ -40,6 +41,7 @@ number below is from the offline model or from deterministic code paths.
 | 16 | Dead-code check | `uv run vulture` | exit 0, no findings (config in `pyproject.toml`) |
 | 17 | Design agent reaches knowledge through MCP | `GET /runs/{id}` after the design gate | `citations: ['engineering-handbook/estimation-guide.md#kb-002']` from pgvector, via the MCP client |
 | 18 | Durable telemetry totals | `GET /metrics` after rebuilding the API container | `persisted: {'calls': 6, 'tokens': 470, 'cost_usd': 0.0}` read from `agent_calls`, not from process memory |
+| 19 | CI on GitHub Actions | push to `main`, run 39633444502 | conclusion `success`: `lint and tests` ok (`uv sync --frozen` + ruff + pytest on the runner), `eval gate has teeth` ok, `eval gate (real model)` ok with the model step **skipped** (no secret) |
 
 ### Eval gate output (offline baseline, 20 golden tickets)
 
@@ -151,7 +153,8 @@ callable instead of a `retriever` object.
 | --- | --- |
 | Real-model eval (`ANTHROPIC_API_KEY`) | **Not executed.** Gate thresholds are unvalidated against Claude; the numbers for a real model are unknown. |
 | LLM-as-judge dimension | Implemented and unit-tested with a scripted judge; **never run against a real judge model**. |
-| GitHub Actions | Workflow written (`lint+tests`, `--baseline-check`, real-model gate with artifact upload). **Never executed** - there is no git repository in this directory yet and no remote. |
+| Real-model gate in CI | The `eval gate (real model)` job completes `success` but the model step is `skipped` because no `ANTHROPIC_API_KEY` secret exists. It reports a notice instead of pretending to have run. |
+| Branch protection | Not configured. CI is green but nothing requires it, so a failing check does not block a merge today. |
 | MCP with a third-party client | Verified over real stdio with a JSON-RPC probe (initialize, tools/list, tools/call) and in a pytest smoke test. Not tried with Claude Desktop or the MCP Inspector UI. |
 | Resume after API restart | Runs persist in Postgres, but the LangGraph checkpointer is `InMemorySaver`, so an in-flight run cannot be resumed after a restart. The `postgres` extra is wired in `pyproject.toml`; the checkpointer swap is not implemented. |
 | Authentication / identity | None. The `role` used for escalation authority is supplied by the caller and not verified. |

@@ -1,13 +1,16 @@
 # DeliveryOps
 
+[![ci](https://github.com/SD-AI-Labs/sdlc-agent-crew/actions/workflows/ci.yml/badge.svg)](https://github.com/SD-AI-Labs/sdlc-agent-crew/actions/workflows/ci.yml)
+
 An agentic software-delivery pipeline: a ticket moves through **intake triage, technical design, a
 proposed code change and review**, a human owns **every** gate, and **passing evals is what allows a
 change to ship**.
 
-> Status: working end to end on the offline model (`DELIVERYOPS_LLM=fake`) and on Claude when a key
-> is present. 112 tests, ruff-clean, vulture-clean, eval gate wired into CI. The CI workflow has **not been
-> executed yet** (this directory is not a git repository) and no real-model run has been made - see
-> `docs/STATUS.md` for exactly what was run. Known limitations are listed at the bottom.
+> Status: working end to end on the offline model (`DELIVERYOPS_LLM=fake`), and on Claude when a key
+> is present. 112 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
+> gate-has-teeth check). **No real-model eval has been run yet** - without `ANTHROPIC_API_KEY` the
+> real-model gate skips and says so. `docs/STATUS.md` records exactly what was run; known
+> limitations are at the bottom.
 
 ## Why it is shaped this way
 
@@ -198,9 +201,11 @@ tests/           112 tests
 - **20 golden tickets.** A floor, not a target; it should grow from real failures.
 - **Regex injection screening.** Deterministic and auditable, not complete.
 - **No patch execution.** By design (ADR 0006): the human applies the diff.
-- **CI is written but unexercised.** `.github/workflows/ci.yml` has not run: the directory has no
-  git repository yet. Creating one and marking `eval gate` a required check is the last step to make
-  the gate actually block a merge.
+- **CI is not yet a merge blocker.** It runs on every push and pull request (lint, tests,
+  `--baseline-check`), but nothing in branch protection requires it, so a red run does not legally
+  block a merge. Marking `eval gate has teeth` required is a repo setting, not code.
+- **The real-model gate is skipped, not passed.** Without `ANTHROPIC_API_KEY` the job reports a
+  notice and skips the model run. Add the secret to turn it into a real gate.
 
 ## What was actually run
 
