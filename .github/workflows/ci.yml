@@ -45,13 +45,21 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with: { enable-cache: true }
       - run: uv sync --frozen --extra anthropic
-      - name: Refuse to run without an API key
+      - name: Check for model credentials
+        id: creds
         run: |
-          if [ -z "${ANTHROPIC_API_KEY}" ]; then
-            echo "ANTHROPIC_API_KEY is not set: add it as a repository secret." >&2
-            exit 1
+          if [ -n "${ANTHROPIC_API_KEY}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Real-model gate skipped::ANTHROPIC_API_KEY is not set." \
+                 "Add it as a repository secret to make this job a real gate."
           fi
-      - run: uv run deliveryops-eval --judge --trials 3 --report eval-report.json
+      # Skips (does not fail, does not pass silently) when no key is configured: the job cannot
+      # claim a model was evaluated if none was.
+      - name: Run the eval gate against the real model
+        if: steps.creds.outputs.available == 'true'
+        run: uv run deliveryops-eval --judge --trials 3 --report eval-report.json
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.creds.outputs.available == 'true'
         with: { name: eval-report, path: eval-report.json }
