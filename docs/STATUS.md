@@ -244,6 +244,56 @@ $ uv run python -c "from deliveryops.orchestrator.factory import graph"   # comp
 Still not executed: any real-model call (no key here), `langgraph dev` end-to-end, and
 everything in the earlier "not executed" table remains true.
 
+## 2026-10-25 (later): retrieval credibility pack (ADR 0010)
+
+5. **Real embeddings behind the embed protocol**: `LangChainEmbedder` (any provider via
+   `init_embeddings`), selected by `DELIVERYOPS_EMBEDDER`/`DELIVERYOPS_EMBED_PROVIDER`/
+   `DELIVERYOPS_EMBED_MODEL`; hash stays the offline default. Embedding prices in
+   `llm/pricing.py`; ingest prints the estimated reingest cost. Not executed: a real embedding
+   call (no provider key in this environment) - the langchain path is covered by structural
+   tests with a fake client only.
+6. **Retrieval eval**: 20 golden query -> kb-id pairs (`evals/golden/retrieval.json`),
+   `deliveryops-eval --retrieval` reports recall@1/@3 against thresholds in `evals/gates.py`.
+   Measured on the offline stack (this machine, these commands):
+   lexical 0.75/0.90 (passes the 0.70/0.90 gate), hash-vector 0.60/0.80 (fails),
+   hybrid-with-hash 0.60/0.90 (fails recall@1). The vector numbers were measured with an
+   in-memory cosine index identical to the pgvector query, **not** against a live database.
+   Known misses: r01 (ship-to-production phrasing ranks rollout policy first) and r15
+   ("roll back" as two tokens never matches "rollback" lexically).
+7. **Confidence cutoff + no-grounding signal**: every retriever takes `min_score`
+   (`DELIVERYOPS_RETRIEVAL_MIN_SCORE`); below it the result is zero hits and the design gate
+   adds "no confident knowledge grounding" (medium risk, not an escalation). Defaults are 0.0
+   (off): measured on this library, no cutoff separates out-of-domain queries from the weakest
+   legitimate golden query (weakest golden top 1.79, strongest sampled out-of-domain top 1.79).
+   Claiming a calibrated default would be fiction; calibrate with a real embedder.
+8. **Hybrid retrieval** (`DELIVERYOPS_RETRIEVER=hybrid`): RRF (k=60) of lexical + vector.
+   Compose now defaults to hybrid.
+9. **Hygiene**: HNSW replaces ivfflat; `knowledge_chunks` gains an `embedder` namespace column
+   (queries filter on it) and a dimensionless vector column - **existing databases need a
+   recreate**; ingest deletes stale sources and reports rows owned by other embedders;
+   database failures degrade to lexical instead of a 500 (`ResilientRetriever`).
+
+Commands actually executed:
+
+```
+$ uv run pytest -q
+159 passed in 2.24s
+$ uv run ruff check src tests
+All checks passed!
+$ uv run vulture                # exit 0, no findings
+$ uv run deliveryops-eval --baseline-check
+OK: the gate rejects the naive baseline
+$ uv run deliveryops-eval --retrieval
+retriever=lexical cases=20 passed=True
+  recall@1   0.75  (gate 0.7)
+  recall@3   0.90  (gate 0.9)
+  MISS  r01: expected kb-001, got ['kb-006', 'kb-002', 'kb-005']
+  MISS  r15: expected kb-006, got []
+```
+
+Still not executed: any real embedding/LLM API call, `--retrieval` against a live database,
+`docker compose up` with the new schema, and everything in the earlier "not executed" lists.
+
 ## Reproduce
 
 ```bash

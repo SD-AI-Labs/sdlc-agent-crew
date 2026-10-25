@@ -109,7 +109,13 @@ uv run --with "langgraph-cli[inmem]" langgraph dev   # langgraph.json points at 
 uv run deliveryops-eval                    # score the configured model, write eval-report.json
 uv run deliveryops-eval --baseline-check   # CI self-check: fails if the dumb baseline passes
 uv run deliveryops-eval --judge            # add the LLM-as-judge requirements dimension
+uv run deliveryops-eval --retrieval        # recall@1/@3 on golden query -> kb-id pairs
 ```
+
+The retrieval gate (`evals/golden/retrieval.json`, thresholds in `evals/gates.py`) measures the
+configured retriever against 20 paraphrased queries with known answers. Measured on the offline
+stack: lexical 0.75/0.90 (passes), hash-vector 0.60/0.80, hybrid-with-hash 0.60/0.90 - the
+honest case for configuring a real embedder (ADR 0010).
 
 Offline baseline, exactly as `deliveryops-eval` prints it today (no API key):
 
@@ -175,10 +181,23 @@ docker compose up --build      # db (pgvector) + knowledge ingest + api + outbox
 
 - `db`: Postgres 16 with pgvector, schema applied on first boot (`db/schema.sql`).
 - `knowledge`: one-shot ingestion of the process library into `knowledge_chunks`.
-- `api`: FastAPI on :8000, `DELIVERYOPS_RETRIEVER=pgvector` and
+- `api`: FastAPI on :8000, `DELIVERYOPS_RETRIEVER=hybrid` (lexical + vector, RRF) and
   `DELIVERYOPS_CHECKPOINTER=postgres` when the database is present, so in-flight runs survive an
   API restart.
 - `worker`: polls the outbox and delivers gate events (durable, replays after restart).
+
+## Knowledge retrieval
+
+The design agent grounds on the process library through the MCP tool layer. Three backends,
+selected by `DELIVERYOPS_RETRIEVER`: `lexical` (offline BM25-ish, default), `pgvector` (cosine
+over ingested chunks), `hybrid` (reciprocal-rank fusion of both). Embeddings come from
+`DELIVERYOPS_EMBEDDER`: the offline `hash` default keeps tests key-free; `langchain` plus
+`DELIVERYOPS_EMBED_PROVIDER`/`DELIVERYOPS_EMBED_MODEL` wires any provider LangChain supports -
+configuration, not code (ADR 0010). Rows are namespaced by embedder so vector spaces never mix;
+reingest deletes stale sources and prints its estimated embedding cost. A low-confidence result
+returns *no* hits (`DELIVERYOPS_RETRIEVAL_MIN_SCORE`), which the design gate surfaces as "no
+confident knowledge grounding" (medium risk); a database failure degrades to lexical instead of
+failing the run.
 
 ## Guardrails
 
@@ -216,7 +235,7 @@ src/deliveryops/
   orchestrator/  graph (LangGraph), pipeline facade, checkpointer selection, outbox, worker
   guardrails/    policy signals, escalation, injection screening
   evals/         scorers, runner, gate thresholds
-  knowledge/     process library, lexical + pgvector retrieval, ingestion
+  knowledge/     process library, lexical/pgvector/hybrid retrieval, ingestion
   mcp_server/    MCP tools (stdio) and the in-process client
   integrations/  Jira Cloud intake, read-only GitHub repo reader (env-configured)
   db/            repository protocol, Postgres and in-memory implementations, schema
@@ -261,6 +280,9 @@ tests/           144 tests
 - **The dashboard is read-only.** Approvals go through the API or the CLI.
 - **20 golden tickets.** A floor, not a target; it should grow from real failures.
 - **Regex injection screening.** Deterministic and auditable, not complete.
+- **The default embedder is a hash.** It cannot rank paraphrases (recall@1 0.60 on the golden
+  retrieval set, vs 0.75 lexical). Configure `DELIVERYOPS_EMBEDDER=langchain` with a real
+  provider for production retrieval quality, and re-measure the retrieval gate (ADR 0010).
 - **No patch execution.** By design (ADR 0006): the human applies the diff.
 - **CI is not yet a merge blocker.** It runs on every push and pull request (lint, tests,
   `--baseline-check`), but nothing in branch protection requires it, so a red run does not legally
