@@ -17,5 +17,9 @@ RUN uv sync --frozen --no-install-project --extra anthropic --extra postgres
 COPY . .
 RUN uv sync --frozen --extra anthropic --extra postgres
 
+# Run as a non-root user (Cloud Run and the compose stack both honour this).
+RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
 CMD ["deliveryops-api"]

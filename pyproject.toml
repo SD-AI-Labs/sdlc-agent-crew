@@ -8,6 +8,7 @@ name = "deliveryops"
 version = "0.2.0"
 description = "Agentic SDLC platform: agents do lifecycle work, humans own the gates, evals decide what ships."
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn>=0.30",
