@@ -210,6 +210,40 @@ Not executed in this pass (and therefore not claimed):
 | Terraform | `terraform plan`/`apply` never run; `deploy/terraform` is unverified against GCP. |
 | Real-model eval | Still not executed (no `ANTHROPIC_API_KEY`), unchanged policy. |
 
+## Update: model-layer standardization + guardrails, 2026-10-25 (same machine)
+
+What changed:
+
+1. **Model-independent LLM layer** (`llm/chat_model.py`): LangChain v1 `init_chat_model` behind
+   the unchanged internal `LLM` protocol; provider and model are env configuration
+   (`DELIVERYOPS_LLM=chat`, `DELIVERYOPS_PROVIDER`, `DELIVERYOPS_MODEL`; extras per provider).
+   The raw-SDK Anthropic client was deleted. langgraph bumped 1.2.16 -> 1.2.17.
+2. **Structured output as transport** (ADR 0008): each agent declares a Pydantic schema;
+   `structured()` tries native JSON-schema mode, then tool-calling, then plain text - the
+   existing validators enforce the contract on every path. Usage/cost metadata preserved.
+3. **LangGraph Studio**: `langgraph.json` + `orchestrator/factory.py` entry point; the compiled
+   graph imports and compiles (verified in-process). `langgraph dev` itself was not launched.
+4. **Guardrails** (ADR 0009): pre-prompt injection screening of GitHub repo content (file names
+   with separator-evasion normalized + file contents; exclusions are visible in the prompt) and
+   a per-run cost cap (`DELIVERYOPS_MAX_RUN_COST_USD`, default 1.00, 0 disables) that fails the
+   run closed. Deferred with reasons recorded: PII redaction, model-based moderation.
+
+Commands actually executed:
+
+```
+$ uv run pytest -q
+144 passed in 2.44s
+$ uv run ruff check .
+All checks passed!
+$ uv run vulture                # exit 0, no findings
+$ uv run deliveryops-eval --baseline-check
+OK: the gate rejects the naive baseline
+$ uv run python -c "from deliveryops.orchestrator.factory import graph"   # compiles
+```
+
+Still not executed: any real-model call (no key here), `langgraph dev` end-to-end, and
+everything in the earlier "not executed" table remains true.
+
 ## Reproduce
 
 ```bash

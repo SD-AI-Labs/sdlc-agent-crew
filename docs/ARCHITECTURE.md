@@ -150,7 +150,7 @@ rather than silently costed at zero.
 | Goal | Change |
 | --- | --- |
 | New stage | add an agent in `agents/`, a node pair in `graph.py`, a policy entry in `POLICIES`, goldens for it |
-| Different model | `llm/` — implement `complete()`; `DELIVERYOPS_LLM` selects it |
+| Different model | configuration only: `DELIVERYOPS_LLM=chat` + `DELIVERYOPS_PROVIDER`/`DELIVERYOPS_MODEL` (LangChain `init_chat_model`); a genuinely new client implements `complete()` in `llm/` |
 | Another tracker / repo host | add an adapter in `integrations/` with the same surface (Jira Cloud and read-only GitHub ship today) |
 | Different knowledge corpus | replace `knowledge/library.py` or ingest externally; retrieval is unchanged |
 | Stricter autonomy policy | edit `POLICIES` thresholds; the escalation path already exists |

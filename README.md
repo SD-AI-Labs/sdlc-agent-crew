@@ -7,7 +7,7 @@ proposed code change and review**, a human owns **every** gate, and **passing ev
 change to ship**.
 
 > Status: working end to end on the offline model (`DELIVERYOPS_LLM=fake`), and on Claude when a key
-> is present. 132 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
+> is present. 144 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
 > gate-has-teeth check). Intake can pull real Jira Cloud tickets and the code agent can ground its
 > diff in a real GitHub repo (both env-configured, both read-only). With `DATABASE_URL` set, run
 > state is in the Postgres checkpointer, so an API restart no longer loses in-flight runs.
@@ -58,7 +58,7 @@ The per-run report (`/runs/{id}/summary`) is the one-page "what the agent did an
 
 ```bash
 uv sync --extra dev --extra anthropic     # uv owns the venv and the lockfile (Python pinned in .python-version)
-uv run pytest -q                          # 132 tests, offline, no API key
+uv run pytest -q                          # 144 tests, offline, no API key
 uv run deliveryops-eval                   # eval gate on the offline baseline (expected: FAIL)
 uv run vulture                            # dead-code check (config in pyproject.toml)
 uv run deliveryops-api                    # http://localhost:8000/docs
@@ -84,11 +84,23 @@ uv run deliveryops-approve <run_id> --approve --role senior
 uv run deliveryops-approve <run_id> --reject --comment "needs a rollback plan"
 ```
 
-Real model:
+Real model - any provider LangChain supports; swapping is configuration, not code:
 
 ```bash
-export ANTHROPIC_API_KEY=... DELIVERYOPS_LLM=anthropic DELIVERYOPS_MODEL=claude-sonnet-4-6
+export DELIVERYOPS_LLM=chat DELIVERYOPS_PROVIDER=anthropic DELIVERYOPS_MODEL=claude-sonnet-4-6
+export ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY / GOOGLE_API_KEY with their extras
+uv sync --extra anthropic             # provider package: --extra anthropic|openai|google
 uv run deliveryops-eval --judge --trials 3 --report eval-report.json
+```
+
+Agents ask for structured output by schema (native JSON-schema mode where the provider offers
+it, tool-calling otherwise, plain text as last resort); the hand-written validators remain the
+contract enforcement on every path (ADR 0008).
+
+Watch the pipeline in LangGraph Studio:
+
+```bash
+uv run --with "langgraph-cli[inmem]" langgraph dev   # langgraph.json points at the graph
 ```
 
 ## Evals: the release gate
@@ -168,6 +180,15 @@ docker compose up --build      # db (pgvector) + knowledge ingest + api + outbox
   API restart.
 - `worker`: polls the outbox and delivers gate events (durable, replays after restart).
 
+## Guardrails
+
+Deterministic and testable, on top of the human gates (ADR 0009): injection screening of ticket
+text at the gates, **pre-prompt injection screening of repository content** fetched from the
+GitHub target (matches are excluded with a visible note, never silently), escalation authority
+by role, patch-trust rules (the diff, not the model's claim, defines touched files), a secret
+scan on every proposed diff, and a per-run cost cap (`DELIVERYOPS_MAX_RUN_COST_USD`, default
+1.00, 0 disables) that fails the run closed before the next paid call.
+
 ## Deploy
 
 `deploy/` carries the production target: Cloud Run (`deliveryops-api` + `deliveryops-worker`) on
@@ -204,8 +225,8 @@ src/deliveryops/
   api/           FastAPI app
 evals/golden/    golden tickets
 deploy/          Cloud Run + Cloud SQL: terraform and runbook
-docs/            ARCHITECTURE.md, STATUS.md, adr/ (seven decisions)
-tests/           132 tests
+docs/            ARCHITECTURE.md, STATUS.md, adr/ (nine decisions)
+tests/           144 tests
 ```
 
 ## Deeper reading
@@ -225,6 +246,8 @@ tests/           132 tests
 | 0005 | Guardrails take plain signal dicts; escalation changes who may approve |
 | 0006 | The code agent proposes patches; humans apply them |
 | 0007 | Jira and GitHub are env-configured adapters; the mock stays the default |
+| 0008 | Model-independent LLM layer; full agent loops evaluated and deferred |
+| 0009 | Guardrails for untrusted external content |
 
 ## Known limitations
 
@@ -233,7 +256,8 @@ tests/           132 tests
   in-memory mode, restarting the API still loses in-flight runs - by design, that mode is for
   tests and demos.
 - **No authentication or multi-tenancy.** The API is a single-tenant demo; `role` is asserted, not
-  verified by an identity provider.
+  verified by an identity provider. Rate limiting and authn belong to the deployment target
+  (IAP / API gateway), per ADR 0009.
 - **The dashboard is read-only.** Approvals go through the API or the CLI.
 - **20 golden tickets.** A floor, not a target; it should grow from real failures.
 - **Regex injection screening.** Deterministic and auditable, not complete.
