@@ -70,6 +70,7 @@ class Pipeline:
         tracer: Tracer | None = None,
         search=None,
         checkpointer=None,
+        repo_reader=None,
     ) -> None:
         self.repo = repo or InMemoryRepository()
         self.outbox = outbox or Outbox()
@@ -77,7 +78,7 @@ class Pipeline:
         self.nodes = StageNodes(
             intake=IntakeAgent(llm),
             design=DesignAgent(llm, search=search),
-            code=CodeAgent(llm),
+            code=CodeAgent(llm, repo=repo_reader),
             review=ReviewAgent(llm),
             tracer=self.tracer,
             outbox=self.outbox,

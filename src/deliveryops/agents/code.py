@@ -60,17 +60,48 @@ def validate(raw: dict) -> CodeResult:
     )
 
 
+MAX_CONTEXT_FILES = 3
+MAX_CONTEXT_CHARS = 12_000
+
+
+def _repo_context(repo, hint: str) -> str:
+    """Read-only grounding: the target repo's listing plus the files the design names."""
+    try:
+        listing = repo.list_files()
+    except Exception:  # an unreachable repo must not fail the stage; note it and go on
+        return "Target repository unreachable; the diff could not be grounded in real files."
+    named = [p for p in listing if p in hint or ("/" in p and p.split("/")[-1] in hint)]
+    blocks = ["Files in the target repository:", *[f"- {p}" for p in listing[:200]]]
+    budget = MAX_CONTEXT_CHARS
+    for path in named[:MAX_CONTEXT_FILES]:
+        got = repo.read_file(path)
+        text = got.get("text", "")
+        if "error" in got or not text:
+            continue
+        chunk = text[:budget]
+        budget -= len(chunk)
+        blocks.append(f"--- {path} ---\n{chunk}")
+        if budget <= 0:
+            break
+    return "\n".join(blocks)
+
+
 class CodeAgent:
     name = "code"
 
-    def __init__(self, llm: LLM) -> None:
+    def __init__(self, llm: LLM, repo=None) -> None:
         self.llm = llm
+        self.repo = repo  # read-only repo reader (integrations.github); None = ungrounded
 
     def run(self, title: str, design_approach: str, requirements: list[str]) -> CodeResult:
         user = (
             f"Ticket: {title}\nDesign: {design_approach}\n"
             f"Requirements:\n- " + "\n- ".join(requirements)
         )
+        if self.repo is not None:
+            hint = design_approach + "\n" + "\n".join(requirements)
+            user += ("\n\nRepository context (read-only; the diff must apply against the "
+                     "real target repo):\n" + _repo_context(self.repo, hint))
         res = self.llm.complete(SYSTEM, user, max_tokens=2000)
         result = validate(parse_json(res, "code"))
         result.meta = meta_of(res)

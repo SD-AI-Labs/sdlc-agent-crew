@@ -11,9 +11,11 @@ from pydantic import BaseModel, Field
 
 from ..console.dashboard import render_dashboard
 from ..db.repository import get_repository
+from ..integrations.github import get_repo_reader
+from ..integrations.jira import JiraError, get_ticket_store
 from ..llm.factory import get_llm
-from ..mcp_server.jira import TicketStore
 from ..observability.report import executive_summary
+from ..orchestrator.checkpoint import get_checkpointer
 from ..orchestrator.pipeline import (
     GateClosed,
     InsufficientAuthority,
@@ -24,14 +26,25 @@ from ..orchestrator.worker import build_outbox
 
 _repo = get_repository()
 _pipeline: Pipeline | None = None
-_tickets = TicketStore()
+_tickets = None
+
+
+def get_ticket_provider():
+    """Lazy: env is read when the first ticket arrives, not at import time."""
+    global _tickets
+    if _tickets is None:
+        _tickets = get_ticket_store()
+    return _tickets
 
 
 def get_pipeline() -> Pipeline:
     global _pipeline
     if _pipeline is None:
         # Same outbox backend as the worker: with a database, gate events are durable rows.
-        _pipeline = Pipeline(get_llm(), repo=_repo, outbox=build_outbox())
+        # The checkpointer follows the database too: durable state, resumable after restart.
+        _pipeline = Pipeline(get_llm(), repo=_repo, outbox=build_outbox(),
+                             checkpointer=get_checkpointer(),
+                             repo_reader=get_repo_reader())
     return _pipeline
 
 
@@ -69,7 +82,10 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
     def submit(ticket: TicketIn) -> dict:
         title, description = ticket.title, ticket.description
         if ticket.ticket_id:
-            found = _tickets.get(ticket.ticket_id)
+            try:
+                found = get_ticket_provider().get(ticket.ticket_id)
+            except JiraError as e:
+                raise HTTPException(502, f"tracker unreachable: {e}") from e
             if not found:
                 raise HTTPException(404, "ticket not found")
             title, description = found.title, found.description
