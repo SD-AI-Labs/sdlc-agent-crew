@@ -25,7 +25,7 @@ number below is from the offline model or from deterministic code paths.
 | --- | --- | --- | --- |
 | 1 | Install from lockfile | `uv sync --frozen --extra dev --extra anthropic` | ok, project + all console scripts installed |
 | 2 | Lint | `uv run ruff check .` | `All checks passed!` |
-| 3 | Test suite | `uv run pytest -q` | `112 passed in 1.28s` |
+| 3 | Test suite | `uv run pytest -q` | `112 passed in 1.28s` (132 passed after the 2026-10-25 pass, see below) |
 | 4 | Eval gate blocks the baseline | `uv run deliveryops-eval` | exit 1, `passed=False` (see below) |
 | 5 | Gate self-check | `uv run deliveryops-eval --baseline-check` | `OK: the gate rejects the naive baseline`, exit 0 |
 | 6 | Stack boots | `docker compose up -d` | `db` healthy, `knowledge` ingested 8 docs, `api` up, `worker` up |
@@ -57,7 +57,6 @@ model=fake-keyword-llm cases=20 trials=1 passed=False cost=$0.0000
   GATE FAIL  priority: 0.70 < 0.8
   GATE FAIL  estimate: 0.62 < 0.7
   GATE FAIL  requirements: 0.07 < 0.6
-  GATE FAIL  critical case failed: T-002
   GATE FAIL  critical case failed: T-009
   GATE FAIL  critical case failed: T-010
   GATE FAIL  critical case failed: T-015
@@ -65,6 +64,8 @@ model=fake-keyword-llm cases=20 trials=1 passed=False cost=$0.0000
 ```
 
 This is the intended result: the naive baseline is not shippable, and the gate says so with reasons.
+(The paste above was regenerated on 2026-10-25 against the current code: T-002 passes now, so the
+critical list is four cases. The earlier paste listed five; see the update section below.)
 `requirements 0.07` is the design working: the `must_mention` terms are synthesis terms
 (`regression`, `rollback`, `idempotency`), so echoing the ticket scores near zero.
 
@@ -143,7 +144,7 @@ fix was to make the claim true rather than drop the code:
 | `Repository.calls` | `/metrics` `persisted` block | token/cost totals survive an API restart |
 
 Result after the pass: `uv run vulture` exit 0, `uv run ruff check .` clean, `uv run pytest -q`
-112 passed. Surface changes worth knowing: MCP exposes 8 tools (was 9), `/metrics` gained
+112 passed (132 after the 2026-10-25 pass). Surface changes worth knowing: MCP exposes 8 tools (was 9), `/metrics` gained
 `persisted`, the gate payload can carry `injection_phrases`, and `DesignAgent` takes a `search`
 callable instead of a `retriever` object.
 
@@ -156,12 +157,58 @@ callable instead of a `retriever` object.
 | Real-model gate in CI | The `eval gate (real model)` job completes `success` but the model step is `skipped` because no `ANTHROPIC_API_KEY` secret exists. It reports a notice instead of pretending to have run. |
 | Branch protection | Not configured. CI is green but nothing requires it, so a failing check does not block a merge today. |
 | MCP with a third-party client | Verified over real stdio with a JSON-RPC probe (initialize, tools/list, tools/call) and in a pytest smoke test. Not tried with Claude Desktop or the MCP Inspector UI. |
-| Resume after API restart | Runs persist in Postgres, but the LangGraph checkpointer is `InMemorySaver`, so an in-flight run cannot be resumed after a restart. The `postgres` extra is wired in `pyproject.toml`; the checkpointer swap is not implemented. |
+| Resume after API restart | **Implemented 2026-10-25** (`orchestrator/checkpoint.py`, default postgres when `DATABASE_URL` is set). Unit-tested: selection rules, plus a restart-resume test across two pipeline objects sharing a durable checkpointer. **Not yet verified against a real Postgres in this pass** (no Docker on the machine used); the compose stack and `deploy/README.md` step 5 are the way to prove it. |
 | Authentication / identity | None. The `role` used for escalation authority is supplied by the caller and not verified. |
 | Per-stage metrics after restart | `/metrics` now reports `persisted` totals (calls, tokens, cost) read from `agent_calls`, but the per-stage breakdown and p95 latency are still aggregated from in-process spans. A restart keeps the totals, not the stage detail. |
 | pgvector index quality | `ivfflat (lists=10)` on 8 rows; recall is not measured and the index adds nothing at this size. |
 | Dashboard | Verified at desktop width only; no responsive/a11y pass. Read-only by design. |
 | Docker image size / hardening | Based on `python:3.12-slim`, runs as root. Not a deployment artifact. |
+
+## Update: production-hardening pass, 2026-10-25
+
+Environment for everything below: Linux x86_64 sandbox, Python 3.12.15 (uv-managed, now pinned by
+`.python-version`), uv 0.13.3. No Docker and no network credentials were present, which bounds
+what could be executed.
+
+What changed:
+
+1. **Jira Cloud intake** (`integrations/jira.py`): real REST v3 get/list/create behind the ticket
+   store seam, env-configured (`JIRA_SITE`/`JIRA_EMAIL`/`JIRA_API_TOKEN`/`JIRA_PROJECT`), partial
+   config is a loud error. Mock store stays the default.
+2. **Read-only GitHub grounding** (`integrations/github.py`): repo listing + file contents for the
+   code agent and the MCP repo tools, same gating rules as the local sandbox. No write path to
+   GitHub exists (ADR 0006/0007).
+3. **Postgres checkpointer** (`orchestrator/checkpoint.py`): `InMemorySaver` replaced by
+   `PostgresSaver` whenever `DATABASE_URL` is set (override with `DELIVERYOPS_CHECKPOINTER`).
+4. **Housekeeping**: `LICENSE` (MIT - a choice worth revisiting if this should be
+   non-commercial), `.python-version` pin, Docker image runs as non-root, stale T-002 eval paste
+   regenerated in README and this file.
+5. **Deploy config**: `deploy/terraform/` (Cloud Run api + worker, Cloud SQL pgvector, Secret
+   Manager) and `deploy/README.md` runbook.
+
+Commands actually executed in this pass (real output):
+
+```
+$ uv run pytest -q
+132 passed in 2.19s
+$ uv run ruff check .
+All checks passed!
+$ uv run vulture            # exit 0, no findings
+$ uv run deliveryops-eval   # exit 1 - the gate still rejects the baseline (see block above)
+$ uv run deliveryops-eval --baseline-check
+OK: the gate rejects the naive baseline
+```
+
+Not executed in this pass (and therefore not claimed):
+
+| Area | Status |
+| --- | --- |
+| Live Jira Cloud calls | Client is unit-tested with scripted HTTP (20 new tests). No real Jira site was contacted. |
+| Live GitHub API calls | Same: scripted HTTP only. No real repository was read. |
+| Resume after restart on real Postgres | Semantics tested with a shared durable checkpointer; the Postgres-specific path (`PostgresSaver.setup()` and resume) has not run against a live database in this pass. |
+| Docker build / compose up | No Docker on this machine. The non-root Dockerfile change is unverified. |
+| Terraform | `terraform plan`/`apply` never run; `deploy/terraform` is unverified against GCP. |
+| Real-model eval | Still not executed (no `ANTHROPIC_API_KEY`), unchanged policy. |
 
 ## Reproduce
 

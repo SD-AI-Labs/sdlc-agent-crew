@@ -7,10 +7,12 @@ proposed code change and review**, a human owns **every** gate, and **passing ev
 change to ship**.
 
 > Status: working end to end on the offline model (`DELIVERYOPS_LLM=fake`), and on Claude when a key
-> is present. 112 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
-> gate-has-teeth check). **No real-model eval has been run yet** - without `ANTHROPIC_API_KEY` the
-> real-model gate skips and says so. `docs/STATUS.md` records exactly what was run; known
-> limitations are at the bottom.
+> is present. 132 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
+> gate-has-teeth check). Intake can pull real Jira Cloud tickets and the code agent can ground its
+> diff in a real GitHub repo (both env-configured, both read-only). With `DATABASE_URL` set, run
+> state is in the Postgres checkpointer, so an API restart no longer loses in-flight runs.
+> **No real-model eval has been run yet** - without `ANTHROPIC_API_KEY` the real-model gate skips
+> and says so. `docs/STATUS.md` records exactly what was run; known limitations are at the bottom.
 
 ## Why it is shaped this way
 
@@ -28,7 +30,7 @@ Three decisions do the work:
 ## Architecture
 
 ```
- Jira/GitHub ticket (mock store)        MCP tool layer (stdio)
+ Jira Cloud ticket (or mock store)      MCP tool layer (stdio)
             |                          tickets | repo sandbox | knowledge | patch validation
             v                                   ^
   +--------------------------------------------------------+
@@ -55,8 +57,8 @@ The per-run report (`/runs/{id}/summary`) is the one-page "what the agent did an
 ## Quick start (uv, no Docker)
 
 ```bash
-uv sync --extra dev --extra anthropic     # uv owns the venv and the lockfile
-uv run pytest -q                          # 112 tests, offline, no API key
+uv sync --extra dev --extra anthropic     # uv owns the venv and the lockfile (Python pinned in .python-version)
+uv run pytest -q                          # 132 tests, offline, no API key
 uv run deliveryops-eval                   # eval gate on the offline baseline (expected: FAIL)
 uv run vulture                            # dead-code check (config in pyproject.toml)
 uv run deliveryops-api                    # http://localhost:8000/docs
@@ -97,21 +99,45 @@ uv run deliveryops-eval --baseline-check   # CI self-check: fails if the dumb ba
 uv run deliveryops-eval --judge            # add the LLM-as-judge requirements dimension
 ```
 
-Offline baseline, as measured (`deliveryops-eval`, no API key):
+Offline baseline, exactly as `deliveryops-eval` prints it today (no API key):
 
 ```
-model=fake-keyword-llm cases=20 passed=False cost=$0.0000
+model=fake-keyword-llm cases=20 trials=1 passed=False cost=$0.0000
   type               0.60  (gate 0.85)
-  priority           0.70  (gate 0.80)
-  estimate           0.62  (gate 0.70)
-  requirements       0.07  (gate 0.60)
-  safety             1.00  (gate 1.00)
-  GATE FAIL  critical case failed: T-002 / T-009 / T-010 / T-015 / T-019
+  priority           0.70  (gate 0.8)
+  estimate           0.62  (gate 0.7)
+  requirements       0.07  (gate 0.6)
+  safety             1.00  (gate 1.0)
+  GATE FAIL  type: 0.60 < 0.85
+  GATE FAIL  priority: 0.70 < 0.8
+  GATE FAIL  estimate: 0.62 < 0.7
+  GATE FAIL  requirements: 0.07 < 0.6
+  GATE FAIL  critical case failed: T-009
+  GATE FAIL  critical case failed: T-010
+  GATE FAIL  critical case failed: T-015
+  GATE FAIL  critical case failed: T-019
 ```
 
 The requirements score is 0.07 *by design*: `must_mention` holds terms a triage must synthesise
 (`regression`, `rollback`, `idempotency`), not words copied out of the ticket, so echoing the ticket
 scores ~nothing. Golden set and rubric rules: `evals/golden/intake.json`, `docs/adr/0004`.
+
+## External intake: Jira and GitHub
+
+Both are adapters behind the seams the mocks already filled (ADR 0007), selected purely by
+environment. Unset = the mock store and the local repo sandbox, so tests and CI never touch the
+network; a *partial* config is a loud startup error, never a silent fall back.
+
+```bash
+# Jira Cloud REST intake: POST /tickets {"ticket_id": "PROJ-123"} pulls the real ticket;
+# the MCP ticket tools answer from Jira too.
+JIRA_SITE=https://your-domain.atlassian.net JIRA_EMAIL=you@example.com \
+JIRA_API_TOKEN=... JIRA_PROJECT=PROJ uv run deliveryops-api
+
+# Read-only GitHub grounding: the code agent sees the target repo's real file listing and the
+# contents of the files the design names; the diff is still only ever a proposal (ADR 0006).
+DELIVERYOPS_GITHUB_REPO=owner/repo GITHUB_TOKEN=... uv run deliveryops-api
+```
 
 ## MCP tool layer
 
@@ -137,8 +163,16 @@ docker compose up --build      # db (pgvector) + knowledge ingest + api + outbox
 
 - `db`: Postgres 16 with pgvector, schema applied on first boot (`db/schema.sql`).
 - `knowledge`: one-shot ingestion of the process library into `knowledge_chunks`.
-- `api`: FastAPI on :8000, `DELIVERYOPS_RETRIEVER=pgvector` when the database is present.
+- `api`: FastAPI on :8000, `DELIVERYOPS_RETRIEVER=pgvector` and
+  `DELIVERYOPS_CHECKPOINTER=postgres` when the database is present, so in-flight runs survive an
+  API restart.
 - `worker`: polls the outbox and delivers gate events (durable, replays after restart).
+
+## Deploy
+
+`deploy/` carries the production target: Cloud Run (`deliveryops-api` + `deliveryops-worker`) on
+Cloud SQL Postgres 16 with pgvector, secrets in Secret Manager, Terraform in
+`deploy/terraform/` and the runbook in `deploy/README.md`. The image runs as a non-root user.
 
 ## Observability
 
@@ -158,18 +192,20 @@ reported as unpriced rather than silently costed at zero.
 ```
 src/deliveryops/
   agents/        intake, design, code (diff), review; output contracts and diff parsing
-  orchestrator/  graph (LangGraph), pipeline facade, outbox events, worker
+  orchestrator/  graph (LangGraph), pipeline facade, checkpointer selection, outbox, worker
   guardrails/    policy signals, escalation, injection screening
   evals/         scorers, runner, gate thresholds
   knowledge/     process library, lexical + pgvector retrieval, ingestion
   mcp_server/    MCP tools (stdio) and the in-process client
+  integrations/  Jira Cloud intake, read-only GitHub repo reader (env-configured)
   db/            repository protocol, Postgres and in-memory implementations, schema
   observability/ tracer (cost/latency) and the executive report
   console/       dashboard rendering, approval CLI
   api/           FastAPI app
 evals/golden/    golden tickets
-docs/            ARCHITECTURE.md, STATUS.md, adr/ (six decisions)
-tests/           112 tests
+deploy/          Cloud Run + Cloud SQL: terraform and runbook
+docs/            ARCHITECTURE.md, STATUS.md, adr/ (seven decisions)
+tests/           132 tests
 ```
 
 ## Deeper reading
@@ -188,13 +224,14 @@ tests/           112 tests
 | 0004 | How the eval gate decides whether a build may ship |
 | 0005 | Guardrails take plain signal dicts; escalation changes who may approve |
 | 0006 | The code agent proposes patches; humans apply them |
+| 0007 | Jira and GitHub are env-configured adapters; the mock stays the default |
 
 ## Known limitations
 
-- **In-memory checkpointer.** Run state is persisted to Postgres, but LangGraph's execution state is
-  in memory: restarting the API loses in-flight runs (they remain `awaiting_approval` in the
-  database and are not resumable). The `postgres` extra and the checkpointer wiring are the next
-  step.
+- **Checkpointer durability depends on configuration.** With `DATABASE_URL` set the Postgres
+  checkpointer is the default and in-flight runs resume after a restart. In the no-database
+  in-memory mode, restarting the API still loses in-flight runs - by design, that mode is for
+  tests and demos.
 - **No authentication or multi-tenancy.** The API is a single-tenant demo; `role` is asserted, not
   verified by an identity provider.
 - **The dashboard is read-only.** Approvals go through the API or the CLI.
