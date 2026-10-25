@@ -180,6 +180,7 @@ class StageNodes:
             return {
                 "confidence": design.get("confidence"),
                 "open_questions": len(design.get("open_questions") or []),
+                "grounding_hits": len(design.get("citations") or []),
             }
         if stage == "code":
             patch = state.get("patch") or {}

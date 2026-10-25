@@ -29,6 +29,7 @@ class DesignResult:
     open_questions: list[str]
     confidence: float
     citations: list[str] = field(default_factory=list)
+    grounding: dict = field(default_factory=dict)
     meta: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -40,6 +41,7 @@ class DesignResult:
             "open_questions": self.open_questions,
             "confidence": self.confidence,
             "citations": self.citations,
+            "grounding": self.grounding,
         }
 
 
@@ -99,5 +101,12 @@ class DesignAgent:
         )
         raw, meta = complete_structured(self.llm, SYSTEM, user, DesignSchema, "design")
         result = validate(raw, [h["citation"] for h in hits])
+        # An empty hit list is the retriever's confidence cutoff speaking: the design gate
+        # reads this as "no confident knowledge grounding" (ADR 0010).
+        result.grounding = {
+            "hits": len(hits),
+            "top_score": hits[0].get("score") if hits else None,
+            "confident": bool(hits),
+        }
         result.meta = meta
         return result
