@@ -21,7 +21,7 @@ services:
       DELIVERYOPS_MODEL: ${DELIVERYOPS_MODEL:-claude-sonnet-4-6}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DATABASE_URL: postgresql://deliveryops:deliveryops@db:5432/deliveryops
-      DELIVERYOPS_RETRIEVER: ${DELIVERYOPS_RETRIEVER:-pgvector}
+      DELIVERYOPS_RETRIEVER: ${DELIVERYOPS_RETRIEVER:-hybrid}
       DELIVERYOPS_CHECKPOINTER: postgres
       DELIVERYOPS_EVAL_REPORT: /app/eval-report.json
       JIRA_SITE: ${JIRA_SITE:-}
