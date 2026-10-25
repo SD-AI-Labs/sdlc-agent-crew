@@ -23,6 +23,15 @@ CRITICAL_DIMENSIONS: tuple[str, ...] = ("type", "priority")
 MAX_FAILURE_RATE = 0.05      # malformed agent output is a failure, never a skipped case
 MAX_COST_USD = 0.50          # a gate run that costs more than this is a bug in the harness
 
+# Retrieval quality gate (ADR 0010): recall of the golden query -> kb-id pairs, measured with
+# the configured retriever. The defaults below are what the offline hash embedder + lexical
+# hybrid actually achieves on this library - re-measure when the embedder or corpus changes,
+# and never lower a threshold to make a run pass.
+RETRIEVAL_THRESHOLDS: dict[str, float] = {
+    "recall@1": 0.70,
+    "recall@3": 0.90,
+}
+
 
 def check(means: dict[str, float], failure_rate: float, cost_usd: float,
           critical_failures: list[str]) -> list[str]:
@@ -40,3 +49,12 @@ def check(means: dict[str, float], failure_rate: float, cost_usd: float,
         failures.append(f"cost_usd: {cost_usd:.4f} > {MAX_COST_USD}")
     failures.extend(critical_failures)
     return failures
+
+
+def retrieval_check(recalls: dict[str, float]) -> list[str]:
+    """Return gate failures for retrieval recall numbers. Empty list means the gate passes."""
+    return [
+        f"{k}: {recalls[k]:.2f} < {threshold}"
+        for k, threshold in RETRIEVAL_THRESHOLDS.items()
+        if k in recalls and recalls[k] < threshold
+    ]

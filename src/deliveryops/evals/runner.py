@@ -25,7 +25,14 @@ from ..llm.base import LLM
 from ..llm.factory import get_llm
 from ..llm.fake import FakeLLM
 from ..llm.pricing import is_priced
-from .gates import CRITICAL_DIMENSIONS, MAX_COST_USD, THRESHOLDS, check
+from .gates import (
+    CRITICAL_DIMENSIONS,
+    MAX_COST_USD,
+    RETRIEVAL_THRESHOLDS,
+    THRESHOLDS,
+    check,
+    retrieval_check,
+)
 from .scorers import judge_requirements, score_triage
 
 DIMENSIONS = ("type", "priority", "estimate", "requirements")
@@ -130,6 +137,40 @@ def run_eval(golden_path: Path, agent: IntakeAgent | None = None, judge: LLM | N
     }
 
 
+def run_retrieval_eval(golden_path: Path, retriever=None) -> dict:
+    """Golden query -> expected kb-id pairs; recall@1 and recall@3 (ADR 0010).
+
+    Works with any retriever - lexical offline in CI, hybrid against a live database in a
+    staging check. A miss is reported with what came back instead, so tuning is evidence-based.
+    """
+    from ..knowledge.retriever import get_retriever
+
+    golden_text = golden_path.read_text()
+    pairs = json.loads(golden_text)
+    retriever = retriever or get_retriever()
+    per_case: list[dict] = []
+    hit1 = hit3 = 0
+    for pair in pairs:
+        ids = [h.doc_id for h in retriever.search(pair["query"], k=3)]
+        ok1 = bool(ids) and ids[0] == pair["expected"]
+        ok3 = pair["expected"] in ids[:3]
+        hit1 += ok1
+        hit3 += ok3
+        per_case.append({"id": pair["id"], "expected": pair["expected"], "got": ids,
+                         "recall@1": ok1, "recall@3": ok3})
+    recalls = {"recall@1": round(hit1 / len(pairs), 4), "recall@3": round(hit3 / len(pairs), 4)}
+    failures = retrieval_check(recalls)
+    return {
+        "retriever": getattr(retriever, "name", type(retriever).__name__),
+        "cases": len(pairs),
+        "golden_sha": _sha(golden_text),
+        "recalls": recalls,
+        "gate_failures": failures,
+        "passed": not failures,
+        "per_case": per_case,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="DeliveryOps eval gate")
     ap.add_argument("--golden", default="evals/golden/intake.json")
@@ -138,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--judge", action="store_true", help="add the LLM-as-judge dimension")
     ap.add_argument("--baseline-check", action="store_true",
                     help="assert the naive keyword baseline FAILS the gate (CI self-check)")
+    ap.add_argument("--retrieval", action="store_true",
+                    help="eval retrieval recall on the golden query->kb-id pairs")
+    ap.add_argument("--retrieval-golden", default="evals/golden/retrieval.json")
     args = ap.parse_args(argv)
 
     if args.baseline_check:
@@ -150,6 +194,19 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("OK: the gate rejects the naive baseline")
         return 0
+
+    if args.retrieval:
+        report = run_retrieval_eval(Path(args.retrieval_golden))
+        print(f"retriever={report['retriever']} cases={report['cases']} "
+              f"passed={report['passed']}")
+        for k, v in report["recalls"].items():
+            print(f"  {k:10s} {v:.2f}  (gate {RETRIEVAL_THRESHOLDS.get(k, '-')})")
+        for case in report["per_case"]:
+            if not case["recall@3"]:
+                print(f"  MISS  {case['id']}: expected {case['expected']}, got {case['got']}")
+        for f in report["gate_failures"]:
+            print(f"  GATE FAIL  {f}")
+        return 0 if report["passed"] else 1
 
     llm = get_llm()
     judge = llm if args.judge and not isinstance(llm, FakeLLM) else None
