@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "deliveryops": "./src/deliveryops/orchestrator/factory.py:graph"
+  },
+  "env": ".env"
+}

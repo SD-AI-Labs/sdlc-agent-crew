@@ -40,6 +40,25 @@ def str_list(value: object, agent: str, field: str) -> list[str]:
     return value
 
 
+def complete_structured(llm, system: str, user: str, schema, agent: str,
+                        *, max_tokens: int = 1000) -> tuple[dict, dict]:
+    """One completion path for every agent: provider structured output when the LLM offers it
+    (ChatModelLLM.structured), plain text + JSON parsing otherwise (FakeLLM, tests). Either
+    way the agent's validator below enforces the contract - structured output is transport
+    reliability, not the guardrail.
+    """
+    structured = getattr(llm, "structured", None)
+    if callable(structured):
+        try:
+            raw, meta = structured(system, user, schema, max_tokens=max_tokens)
+        except Exception:
+            raw = None
+        if isinstance(raw, dict):
+            return raw, meta
+    res = llm.complete(system, user, max_tokens=max_tokens)
+    return parse_json(res, agent), meta_of(res)
+
+
 def meta_of(res: LLMResult) -> dict:
     return {
         "model": res.model or "unknown",

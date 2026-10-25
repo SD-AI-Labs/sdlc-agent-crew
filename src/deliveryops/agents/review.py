@@ -9,8 +9,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel
+
 from ..llm.base import LLM
-from .base import AgentOutputError, confidence, meta_of, parse_json, require
+from .base import AgentOutputError, complete_structured, confidence, require
 
 SYSTEM = """You are a code reviewer. Return ONLY a JSON object with keys:
   findings: list of {"severity": "low"|"medium"|"high"|"critical",
@@ -83,6 +85,20 @@ def static_scan(diff: str) -> list[Finding]:
     return out
 
 
+class ReviewFindingSchema(BaseModel):
+    severity: str
+    area: str = "correctness"
+    detail: str
+
+
+class ReviewSchema(BaseModel):
+    """Structured-output schema; validate() below remains the contract enforcement."""
+
+    findings: list[ReviewFindingSchema]
+    verdict: str
+    confidence: float
+
+
 class ReviewAgent:
     name = "review"
 
@@ -91,9 +107,9 @@ class ReviewAgent:
 
     def run(self, diff: str, design_approach: str) -> ReviewResult:
         user = f"Design: {design_approach}\n\nProposed diff:\n{diff}"
-        res = self.llm.complete(SYSTEM, user)
-        result = validate(parse_json(res, "review"))
-        result.meta = meta_of(res)
+        raw, meta = complete_structured(self.llm, SYSTEM, user, ReviewSchema, "review")
+        result = validate(raw)
+        result.meta = meta
         scanner = static_scan(diff)
         if scanner:
             result.findings = result.findings + scanner

@@ -4,8 +4,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel, Field
+
 from ..llm.base import LLM
-from .base import confidence, meta_of, parse_json, require, str_list
+from .base import complete_structured, confidence, require, str_list
 
 SYSTEM = """You are a senior engineer producing a technical design for a small change.
 Return ONLY a JSON object with keys:
@@ -67,6 +69,17 @@ def _default_search(query: str, k: int = 3) -> list[dict]:
 KnowledgeSearch = Callable[[str, int], list[dict]]
 
 
+class DesignSchema(BaseModel):
+    """Structured-output schema; validate() below remains the contract enforcement."""
+
+    approach: str
+    components: list[str]
+    risks: list[str] = Field(default_factory=list)
+    test_plan: list[str]
+    open_questions: list[str] = Field(default_factory=list)
+    confidence: float
+
+
 class DesignAgent:
     name = "design"
 
@@ -84,7 +97,7 @@ class DesignAgent:
             f"Approved requirements:\n- " + "\n- ".join(requirements) + "\n\n"
             f"Process knowledge (cite by id when you rely on it):\n{context}"
         )
-        res = self.llm.complete(SYSTEM, user)
-        result = validate(parse_json(res, "design"), [h["citation"] for h in hits])
-        result.meta = meta_of(res)
+        raw, meta = complete_structured(self.llm, SYSTEM, user, DesignSchema, "design")
+        result = validate(raw, [h["citation"] for h in hits])
+        result.meta = meta
         return result

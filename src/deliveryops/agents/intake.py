@@ -3,8 +3,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel
+
 from ..llm.base import LLM
-from .base import AgentOutputError, confidence, meta_of, parse_json, require, str_list
+from .base import (
+    AgentOutputError,
+    complete_structured,
+    confidence,
+    require,
+    str_list,
+)
 
 SYSTEM = """You are an intake triage agent for a software delivery team.
 Return ONLY a JSON object with keys:
@@ -60,6 +68,16 @@ def validate(raw: dict) -> TriageResult:
     return TriageResult(ttype, priority, estimate, reqs, conf)
 
 
+class TriageSchema(BaseModel):
+    """Structured-output schema; validate() below remains the contract enforcement."""
+
+    type: str
+    priority: str
+    estimate_points: int
+    requirements: list[str]
+    confidence: float
+
+
 class IntakeAgent:
     name = "intake"
 
@@ -67,7 +85,8 @@ class IntakeAgent:
         self.llm = llm
 
     def run(self, title: str, description: str) -> TriageResult:
-        res = self.llm.complete(SYSTEM, f"Title: {title}\n\n{description}")
-        result = validate(parse_json(res, "intake"))
-        result.meta = meta_of(res)
+        raw, meta = complete_structured(self.llm, SYSTEM, f"Title: {title}\n\n{description}",
+                                        TriageSchema, "intake")
+        result = validate(raw)
+        result.meta = meta
         return result
