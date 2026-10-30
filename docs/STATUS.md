@@ -489,6 +489,23 @@ Not executed in this pass (and therefore not claimed):
 | `run.sh` local via docker compose | **Not run** (no Docker in this sandbox). The compose branch is three commands and a print; its first real run is on a machine with Docker. |
 | CI matrix job | **Not run.** The workflow change is committed; GitHub Actions will exercise it on the next push - which has not happened (nothing is pushed). |
 
+## Addendum (2026-10-30, late): provider binaries purged from history
+
+The GCP provider binaries under `deploy/terraform/gcp/.terraform/` (a 117 MB
+`terraform-provider-google` binary - over GitHub's 100 MB per-file limit, so a push
+would have been rejected - plus an 18 MB random provider) were tracked in the local
+commits. They entered in the worker `$PORT` commit via a `git add -A` after a local
+`terraform validate` run, before the `.terraform/` ignore rule existed; the later
+`git mv` carried them along. Because those commits had never been pushed, the history
+was rewritten with `git filter-repo` (paths `*/.terraform/*` stripped) instead of only
+untracking them going forward. Result: pack size 136 MB -> 0.4 MB, all 26 commits and
+their content preserved, `.gitignore` now uses `**/.terraform/`. Two consequences worth
+knowing: commit hashes from the production-readiness commit onward changed (its tree is
+byte-identical to the pushed original - verified with an empty diff - so the divergence
+is hash-only and reconciles trivially at push time), and a pre-rewrite bundle backup was
+kept outside the repo until the rewritten history is pushed. `terraform init` re-downloads
+providers on demand; nothing functional changed.
+
 ## Reproduce
 
 ```bash
