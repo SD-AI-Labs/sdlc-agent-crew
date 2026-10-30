@@ -10,6 +10,8 @@ import json
 import time
 from dataclasses import asdict, dataclass, field
 
+from ..db.repository import get_pool
+
 
 @dataclass(frozen=True)
 class Event:
@@ -54,10 +56,12 @@ class PostgresOutbox:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
 
-    def publish(self, run_id: str, type_: str, stage: str, payload: dict | None = None) -> Event:
-        import psycopg
+    def _connect(self):
+        # Same shared pool as the repository: one pool per DSN per process.
+        return get_pool(self._dsn).connection()
 
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+    def publish(self, run_id: str, type_: str, stage: str, payload: dict | None = None) -> Event:
+        with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO outbox (run_id, type, stage, payload) VALUES (%s,%s,%s,%s)",
                 (run_id, type_, stage, json.dumps(payload or {})),
@@ -66,9 +70,7 @@ class PostgresOutbox:
         return Event(run_id, type_, stage, payload or {})
 
     def pending(self) -> list[Event]:
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+        with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT run_id, type, stage, payload, EXTRACT(EPOCH FROM ts) FROM outbox "
                 "WHERE delivered_at IS NULL ORDER BY id"
@@ -77,9 +79,7 @@ class PostgresOutbox:
         return [Event(str(r[0]), r[1], r[2], r[3] or {}, float(r[4])) for r in rows]
 
     def has(self, run_id: str, type_: str, stage: str) -> bool:
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+        with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM outbox WHERE run_id = %s AND type = %s AND stage = %s LIMIT 1",
                 (run_id, type_, stage),
@@ -87,9 +87,7 @@ class PostgresOutbox:
             return cur.fetchone() is not None
 
     def mark_delivered(self, event: Event) -> None:
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+        with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE outbox SET delivered_at = now() WHERE run_id = %s AND type = %s "
                 "AND stage = %s AND delivered_at IS NULL",

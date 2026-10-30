@@ -9,7 +9,10 @@ import json
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from psycopg_pool import ConnectionPool
 
 from ..observability.tracer import Span
 
@@ -101,6 +104,41 @@ class InMemoryRepository:
         return [e for e in self._escalations if run_id is None or e.run_id == run_id]
 
 
+# One connection pool per DSN, shared by every Postgres-backed component in the
+# process (repository, outbox). Created lazily on first use: constructing a
+# repository must stay side-effect free, exactly as it was when each call opened
+# its own connection.
+_POOLS: dict[str, ConnectionPool] = {}
+
+
+def _pool_size(env_name: str, default: int) -> int:
+    raw = os.getenv(env_name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{env_name} must be an integer, got {raw!r}") from None
+
+
+def get_pool(dsn: str) -> ConnectionPool:
+    """The shared pool for a DSN. Sizes come from DELIVERYOPS_DB_POOL_MIN /
+    DELIVERYOPS_DB_POOL_MAX (defaults 1/8); the deployment budget is
+    API instances x pool max, which must stay under the database's
+    max_connections (see deploy/terraform)."""
+    pool = _POOLS.get(dsn)
+    if pool is None:
+        from psycopg_pool import ConnectionPool
+
+        pool = ConnectionPool(
+            dsn,
+            min_size=_pool_size("DELIVERYOPS_DB_POOL_MIN", 1),
+            max_size=_pool_size("DELIVERYOPS_DB_POOL_MAX", 8),
+        )
+        _POOLS[dsn] = pool
+    return pool
+
+
 class PostgresRepository:
     """Stores runs as JSONB state plus normalised audit, telemetry and escalation rows."""
 
@@ -108,9 +146,9 @@ class PostgresRepository:
         self._dsn = dsn
 
     def _connect(self):
-        import psycopg
-
-        return psycopg.connect(self._dsn)
+        # A context manager over a pooled connection: the same `with` shape the
+        # per-call psycopg.connect() had, without a fresh handshake per statement.
+        return get_pool(self._dsn).connection()
 
     def save(self, record: RunRecord) -> None:
         sql = (
