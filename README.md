@@ -230,7 +230,7 @@ verified).
 
 `deploy/` carries the production target: Cloud Run (`deliveryops-api` + `deliveryops-worker`) on
 Cloud SQL Postgres 16 with pgvector, secrets in Secret Manager, Terraform in
-`deploy/terraform/` and the runbook in `deploy/README.md`. The image runs as a non-root user.
+`deploy/terraform/gcp/` and the runbook in `deploy/README.md`. The image runs as a non-root user.
 
 ## Observability
 

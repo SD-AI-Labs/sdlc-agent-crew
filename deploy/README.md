@@ -25,7 +25,7 @@ gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/deliveryops/app:$(
 ## 2. Terraform
 
 ```bash
-cd deploy/terraform
+cd deploy/terraform/gcp
 terraform init \
   -backend-config="bucket=<state-bucket>" \
   -backend-config="prefix=deliveryops/<env>"

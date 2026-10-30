@@ -43,8 +43,8 @@ jobs:
       - run: terraform fmt -check -recursive deploy/terraform
       # -backend=false: validate the configuration without touching remote
       # state (CI has no business holding state credentials).
-      - run: terraform -chdir=deploy/terraform init -backend=false
-      - run: terraform -chdir=deploy/terraform validate
+      - run: terraform -chdir=deploy/terraform/gcp init -backend=false
+      - run: terraform -chdir=deploy/terraform/gcp validate
 
   gate-self-check:
     name: eval gate has teeth

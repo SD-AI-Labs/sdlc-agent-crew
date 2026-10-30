@@ -125,7 +125,7 @@ def get_pool(dsn: str) -> ConnectionPool:
     """The shared pool for a DSN. Sizes come from DELIVERYOPS_DB_POOL_MIN /
     DELIVERYOPS_DB_POOL_MAX (defaults 1/8); the deployment budget is
     API instances x pool max, which must stay under the database's
-    max_connections (see deploy/terraform)."""
+    max_connections (see deploy/terraform/<target>)."""
     pool = _POOLS.get(dsn)
     if pool is None:
         from psycopg_pool import ConnectionPool
