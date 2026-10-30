@@ -234,6 +234,9 @@ resource "google_cloud_run_v2_service" "worker" {
     containers {
       image   = var.image
       command = ["deliveryops-worker"]
+      # Cloud Run sets PORT=8080 and requires the container to listen on it:
+      # the worker serves GET /health there whenever PORT is set.
+      ports { container_port = 8080 }
       resources {
         limits   = { cpu = "1", memory = "512Mi" }
         cpu_idle = false # CPU always allocated, not only during requests

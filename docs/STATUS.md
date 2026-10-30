@@ -374,6 +374,25 @@ Not executed in this pass (and therefore not claimed):
 | Secret *versions* pinning | Not done (Phase 1 plan item 1.6): services still reference `latest`. Rotation safety is unchanged from before this pass. |
 | `DELIVERYOPS_EMBEDDER` factory default | `get_embedder()` itself still maps unknown values to the hash embedder silently; startup validation now rejects them for the API and worker entry points, but the eval runner and knowledge ingest do not call `validate_config()`. |
 
+### Addendum (same day): the worker `$PORT` gap above is closed
+
+`deliveryops-worker` now serves HTTP when `PORT` is set: a stdlib
+`ThreadingHTTPServer` in a daemon thread answers `GET /health` with the poll loop's
+liveness (uptime, poll count, last successful poll, last error, delivered total) from a
+shared `HealthState` the loop updates on every poll and failure. One route only -
+anything else is 404 - and with no `PORT` set nothing listens, so local and compose
+behaviour is unchanged. The terraform worker service now declares
+`ports { container_port = 8080 }` to match. The event-driven job conversion from the
+production plan remains the longer-term option; this removes the deploy blocker without
+changing the worker's shape.
+
+Executed for this addendum: `uv run pytest -q` (209 passed, +3 health tests over a real
+socket), `ruff` clean, `vulture` clean (the two `BaseHTTPRequestHandler` hooks added to
+the framework-names ignore list), `terraform fmt -check` + `validate` clean, and a live
+smoke run - the real worker process started with `PORT` set, `/health` returned live poll
+counters, other paths returned 404, and the process stopped cleanly. Still not executed:
+a real Cloud Run deployment (no GCP access in this sandbox).
+
 ## Reproduce
 
 ```bash

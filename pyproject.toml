@@ -52,12 +52,13 @@ ignore = ["B008"]
 
 [tool.vulture]
 # `uv run vulture` reports dead code. The ignore list is only framework-registered names:
-# FastAPI route handlers, MCP tool functions, dataclass fields consumed via to_dict(), and
-# TypedDict keys consumed through Annotated reducers.
+# FastAPI route handlers, MCP tool functions, dataclass fields consumed via to_dict(),
+# TypedDict keys consumed through Annotated reducers, and http.server handler hooks.
 paths = ["src"]
 min_confidence = 60
 ignore_names = [
     "health", "submit", "list_runs", "get_run", "decide", "get_patch", "get_summary",
     "dashboard", "metrics", "run_status", "area", "spent_usd", "errors",
     "graph",  # langgraph.json entry point (consumed by the LangGraph CLI, not Python)
+    "do_GET", "log_message",  # BaseHTTPRequestHandler hooks (worker's health server)
 ]
