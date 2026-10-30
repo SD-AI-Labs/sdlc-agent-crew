@@ -33,6 +33,19 @@ def test_factory_defaults_to_the_offline_model(monkeypatch):
     assert isinstance(factory.get_llm(), FakeLLM)
 
 
+def test_factory_explicit_fake_still_works(monkeypatch):
+    monkeypatch.setenv("DELIVERYOPS_LLM", "fake")
+    assert isinstance(factory.get_llm(), FakeLLM)
+
+
+def test_factory_unknown_mode_is_a_loud_error_not_a_silent_fake(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("DELIVERYOPS_LLM", "anthropc")  # a typo must not swap in the toy
+    with pytest.raises(ValueError, match="unknown DELIVERYOPS_LLM"):
+        factory.get_llm()
+
+
 def test_factory_maps_modes_to_a_chat_model(monkeypatch):
     built = []
     monkeypatch.setattr("langchain.chat_models.init_chat_model",
