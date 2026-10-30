@@ -208,6 +208,24 @@ by role, patch-trust rules (the diff, not the model's claim, defines touched fil
 scan on every proposed diff, and a per-run cost cap (`DELIVERYOPS_MAX_RUN_COST_USD`, default
 1.00, 0 disables) that fails the run closed before the next paid call.
 
+## API identity (pilot)
+
+By default the API has no auth: a decision's `approver` and `role` are whatever the request body
+claims. Setting `DELIVERYOPS_API_TOKENS` turns on bearer-token identity for a pilot deployment -
+a JSON object mapping each token to the person and role it speaks for:
+
+```bash
+export DELIVERYOPS_API_TOKENS='{"<token>": {"name": "alice", "role": "senior"}}'
+```
+
+Mutating endpoints (`POST /tickets`, `POST /runs/{id}/decision`) then require
+`Authorization: Bearer <token>` (missing or unknown token: 401), and a decision's approver and
+role are taken **from the token** - the body's values are ignored, so authority cannot be
+borrowed by typing it. Reads stay open unless `DELIVERYOPS_AUTH_PROTECT_READS=1` (`/health`
+always stays open for probes). This is a pilot mechanism, not an identity provider: real
+deployments put IAP or OAuth in front (see `docs/STATUS.md` for exactly what is and isn't
+verified).
+
 ## Deploy
 
 `deploy/` carries the production target: Cloud Run (`deliveryops-api` + `deliveryops-worker`) on
@@ -274,8 +292,10 @@ tests/           173 tests
   checkpointer is the default and in-flight runs resume after a restart. In the no-database
   in-memory mode, restarting the API still loses in-flight runs - by design, that mode is for
   tests and demos.
-- **No authentication or multi-tenancy.** The API is a single-tenant demo; `role` is asserted, not
-  verified by an identity provider. Rate limiting and authn belong to the deployment target
+- **Pilot-grade authentication only; no multi-tenancy.** Optional bearer tokens
+  (`DELIVERYOPS_API_TOKENS`, see "API identity") bind decisions to a named identity, but tokens
+  are shared secrets, not an identity provider; `role` is verified against the token, not
+  against an IdP. Rate limiting and real authn belong to the deployment target
   (IAP / API gateway), per ADR 0009.
 - **The dashboard is read-only.** Approvals go through the API or the CLI.
 - **20 golden tickets.** A floor, not a target; it should grow from real failures.
