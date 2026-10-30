@@ -40,6 +40,9 @@ def run_once(outbox) -> int:
 
 def main() -> int:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    from ..config import validate_config
+
+    validate_config()
     outbox = build_outbox()
     interval = float(os.getenv("DELIVERYOPS_WORKER_INTERVAL", "1.0"))
     log.info("outbox worker started (backend=%s)", type(outbox).__name__)

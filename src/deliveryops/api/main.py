@@ -190,6 +190,11 @@ app = create_app()
 
 
 def run() -> None:
+    # One validation pass over the whole env surface before serving: a config
+    # typo should refuse the boot, not surface as a failed first request.
+    from ..config import validate_config
+
+    validate_config()
     import uvicorn
 
     uvicorn.run("deliveryops.api.main:app", host="0.0.0.0",
