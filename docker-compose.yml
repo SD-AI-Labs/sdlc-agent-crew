@@ -21,8 +21,15 @@ services:
       DELIVERYOPS_MODEL: ${DELIVERYOPS_MODEL:-claude-sonnet-4-6}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DATABASE_URL: postgresql://deliveryops:deliveryops@db:5432/deliveryops
-      DELIVERYOPS_RETRIEVER: ${DELIVERYOPS_RETRIEVER:-pgvector}
+      DELIVERYOPS_RETRIEVER: ${DELIVERYOPS_RETRIEVER:-hybrid}
+      DELIVERYOPS_CHECKPOINTER: postgres
       DELIVERYOPS_EVAL_REPORT: /app/eval-report.json
+      JIRA_SITE: ${JIRA_SITE:-}
+      JIRA_EMAIL: ${JIRA_EMAIL:-}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN:-}
+      JIRA_PROJECT: ${JIRA_PROJECT:-}
+      DELIVERYOPS_GITHUB_REPO: ${DELIVERYOPS_GITHUB_REPO:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     ports: ["8000:8000"]
     depends_on:
       db: {condition: service_healthy}

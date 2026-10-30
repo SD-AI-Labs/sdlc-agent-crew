@@ -100,6 +100,12 @@ def evaluate(stage: str, signals: dict, policy: StagePolicy | None = None) -> Ga
         reasons.append(f"design left {open_questions} open question(s) for a human")
         risk = _raise_risk(risk, Risk.MEDIUM)
 
+    grounding = signals.get("grounding_hits")
+    if grounding is not None and grounding == 0:
+        reasons.append("no confident knowledge grounding (retrieval cutoff or empty "
+                       "knowledge base)")
+        risk = _raise_risk(risk, Risk.MEDIUM)
+
     hits = signals.get("injection_hits") or []
     if hits:
         reasons.append(f"prompt-injection signals ({', '.join(sorted(hits))})")

@@ -11,7 +11,7 @@ changing it. Decisions and their trade-offs live in `docs/adr/`.
 ```
                     +---------------------------+
   ticket text  ---> |  API (FastAPI)            | <--- approval CLI / dashboard
-  (or mock Jira)    |  /tickets /runs /metrics  |
+  (Jira or mock)    |  /tickets /runs /metrics  |
                     +------------+--------------+
                                  |
                                  v
@@ -60,14 +60,17 @@ is injected. Adding a stage means adding an agent node plus a gate node and wiri
 | Guardrails | `guardrails/policy.py`, `guardrails/injection.py` | risk, reasons, escalation from signal dicts | calling models |
 | Evals | `evals/*` | golden set scoring, gate thresholds, release decision | touching production data |
 | MCP tools | `mcp_server/server.py` | tickets, repo sandbox, knowledge search, patch validation, run status | holding state |
+| Integrations | `integrations/jira.py`, `integrations/github.py` | Jira Cloud intake, read-only GitHub repo grounding | writes to either system |
 | Knowledge | `knowledge/*` | process library, lexical + pgvector retrieval, ingestion | deciding relevance policy |
 | Repository | `db/repository.py` | run/audit/telemetry/escalation persistence | orchestration |
 | Observability | `observability/tracer.py`, `report.py` | spans, cost/latency aggregates, executive report | alerting |
 | Console | `console/dashboard.py`, `console/approve.py` | read-only dashboard, terminal approval | mutation outside the API |
 
 Dependency direction is one-way: API → pipeline → graph → agents/guardrails; agents reach data
-through the MCP client, not by importing retrievers or filing systems directly. That is what makes
-`mcp_server/client.py` the single place to swap a mock Jira for the real one.
+through the MCP client, not by importing retrievers or filing systems directly. Real external
+systems are env-configured adapters behind those same seams (`integrations/`, ADR 0007): Jira
+Cloud fills the ticket-store surface, a strictly read-only GitHub reader grounds the code agent
+and the repo tools, and the mocks stay the default when no `JIRA_*`/`DELIVERYOPS_GITHUB_*` is set.
 
 ## 3. Run lifecycle
 
@@ -138,7 +141,7 @@ rather than silently costed at zero.
 | --- | --- | --- |
 | Model returns non-JSON or violates the contract | run → `failed`, no gate opens, audit entry written | a gate you can walk past with junk is not a gate |
 | Postgres unavailable mid-run | API surfaces the error; in-memory repo keeps offline use working | persistence is not allowed to silently drop audit rows |
-| API restarts mid-run | run stays `awaiting_approval` in the DB but cannot be resumed | checkpointer is `InMemorySaver` today (known limitation) |
+| API restarts mid-run | with the Postgres checkpointer (default when `DATABASE_URL` is set) the run resumes from the open gate; with `DELIVERYOPS_CHECKPOINTER=memory` it stays `awaiting_approval` and cannot be resumed | durable execution state, not a process-memory promise |
 | Worker down | events accumulate undelivered in `outbox`; delivery resumes on restart | at-least-once, ordered by insert id |
 | Eval gate fails | CI job fails, merge is blocked (once the check is required) | evals, not opinions |
 
@@ -147,11 +150,11 @@ rather than silently costed at zero.
 | Goal | Change |
 | --- | --- |
 | New stage | add an agent in `agents/`, a node pair in `graph.py`, a policy entry in `POLICIES`, goldens for it |
-| Different model | `llm/` — implement `complete()`; `DELIVERYOPS_LLM` selects it |
-| Real Jira/GitHub | implement `TicketStore`'s `get`/`list` against the API inside `mcp_server/jira.py` |
+| Different model | configuration only: `DELIVERYOPS_LLM=chat` + `DELIVERYOPS_PROVIDER`/`DELIVERYOPS_MODEL` (LangChain `init_chat_model`); a genuinely new client implements `complete()` in `llm/` |
+| Another tracker / repo host | add an adapter in `integrations/` with the same surface (Jira Cloud and read-only GitHub ship today) |
 | Different knowledge corpus | replace `knowledge/library.py` or ingest externally; retrieval is unchanged |
 | Stricter autonomy policy | edit `POLICIES` thresholds; the escalation path already exists |
-| Durable execution state | swap `InMemorySaver` for the Postgres checkpointer (`postgres` extra) |
+| Durable execution state | shipped: Postgres checkpointer via `DELIVERYOPS_CHECKPOINTER` (default with a database) |
 | Dashboard with real interactivity | keep `/metrics` and `/runs` as the contract, replace `console/dashboard.py` |
 
 ## 8. What this architecture deliberately does not do

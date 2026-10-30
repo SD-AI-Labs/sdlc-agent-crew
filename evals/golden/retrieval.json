@@ -1,0 +1,22 @@
+[
+  {"id": "r01", "query": "when is a change allowed to ship to production", "expected": "kb-001"},
+  {"id": "r02", "query": "what approvals and audit records must exist before release", "expected": "kb-001"},
+  {"id": "r03", "query": "rollback documentation needed for touching payments", "expected": "kb-001"},
+  {"id": "r04", "query": "how many story points for a multi-file change that follows an existing pattern", "expected": "kb-002"},
+  {"id": "r05", "query": "how do we estimate building a new third-party integration", "expected": "kb-002"},
+  {"id": "r06", "query": "should a thirteen point ticket be split up", "expected": "kb-002"},
+  {"id": "r07", "query": "customer reports data loss, what priority is that", "expected": "kb-003"},
+  {"id": "r08", "query": "a cosmetic issue on an internal-only page, how severe", "expected": "kb-003"},
+  {"id": "r09", "query": "ticket says urgent but the flow has a workaround", "expected": "kb-003"},
+  {"id": "r10", "query": "what to check before merging a new API endpoint", "expected": "kb-004"},
+  {"id": "r11", "query": "is building sql by string concatenation acceptable", "expected": "kb-004"},
+  {"id": "r12", "query": "adding a dependency without pinning its version", "expected": "kb-004"},
+  {"id": "r13", "query": "when does a run get escalated to a human reviewer", "expected": "kb-005"},
+  {"id": "r14", "query": "is needing human approval a failure of the agents", "expected": "kb-005"},
+  {"id": "r15", "query": "how do we roll back a bad deployment", "expected": "kb-006"},
+  {"id": "r16", "query": "can we reverse a database migration to roll back", "expected": "kb-006"},
+  {"id": "r17", "query": "is a unit test allowed to hit the real network", "expected": "kb-007"},
+  {"id": "r18", "query": "when should the agent write tests relative to the patch", "expected": "kb-007"},
+  {"id": "r19", "query": "how to start writing evals for an agent", "expected": "kb-008"},
+  {"id": "r20", "query": "is it ok to lower a gate threshold so the eval run passes", "expected": "kb-008"}
+]

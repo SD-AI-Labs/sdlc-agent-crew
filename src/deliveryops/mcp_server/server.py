@@ -13,13 +13,31 @@ from mcp.server.mcpserver import MCPServer
 from ..agents.diff import InvalidPatch
 from ..agents.diff import parse as parse_diff
 from ..agents.review import static_scan
+from ..integrations.github import get_repo_reader
+from ..integrations.jira import get_ticket_store
 from ..knowledge.retriever import get_retriever
-from .jira import TicketStore
 
 REPO_ROOT = Path(os.getenv("DELIVERYOPS_REPO_ROOT", ".")).resolve()
 MAX_FILE_BYTES = 200_000
 
-_store = TicketStore()
+_store = None
+_repo_reader = "unset"
+
+
+def _ticket_store():
+    """Lazy so env config (JIRA_*) is read on first use, not at import."""
+    global _store
+    if _store is None:
+        _store = get_ticket_store()
+    return _store
+
+
+def _reader():
+    """GitHub reader when DELIVERYOPS_GITHUB_REPO is set, else the local sandbox root."""
+    global _repo_reader
+    if _repo_reader == "unset":
+        _repo_reader = get_repo_reader()
+    return _repo_reader
 
 server = MCPServer(
     "deliveryops",
@@ -32,21 +50,21 @@ server = MCPServer(
 
 @server.tool()
 def get_ticket(ticket_id: str) -> dict:
-    """Fetch a tracker ticket (id like OPS-101)."""
-    t = _store.get(ticket_id)
+    """Fetch a tracker ticket (Jira key like PROJ-123, or OPS-101 from the mock store)."""
+    t = _ticket_store().get(ticket_id)
     return t.to_dict() if t else {"error": f"ticket {ticket_id} not found"}
 
 
 @server.tool()
 def list_tickets() -> list[dict]:
     """List open tracker tickets."""
-    return [t.to_dict() for t in _store.list()]
+    return [t.to_dict() for t in _ticket_store().list()]
 
 
 @server.tool()
 def create_ticket(title: str, description: str, reporter: str = "mcp") -> dict:
     """Create a tracker ticket and return it."""
-    return _store.create(title, description, reporter).to_dict()
+    return _ticket_store().create(title, description, reporter).to_dict()
 
 
 # ---------- repository ----------
@@ -62,7 +80,10 @@ def _safe_path(rel: str) -> Path:
 
 @server.tool()
 def read_repo_file(path: str) -> dict:
-    """Read a file from the sandboxed repository root."""
+    """Read a file from the target repository (GitHub when configured, else the local root)."""
+    reader = _reader()
+    if reader is not None:
+        return reader.read_file(path)
     try:
         p = _safe_path(path)
     except PermissionError as e:
@@ -75,7 +96,10 @@ def read_repo_file(path: str) -> dict:
 
 @server.tool()
 def list_repo_files(subdir: str = ".") -> list[str]:
-    """List files under a subdirectory of the sandboxed repository root."""
+    """List files in the target repository (GitHub when configured, else the local root)."""
+    reader = _reader()
+    if reader is not None:
+        return reader.list_files(subdir)
     try:
         root = _safe_path(subdir)
     except PermissionError as e:

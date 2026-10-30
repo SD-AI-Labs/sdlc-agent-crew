@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel
+
+from ..guardrails import injection
 from ..llm.base import LLM
-from .base import AgentOutputError, confidence, meta_of, parse_json, require, str_list
+from .base import AgentOutputError, complete_structured, confidence, require, str_list
 from .diff import DiffInfo, InvalidPatch, parse
 
 SYSTEM = """You are a careful engineer proposing the smallest correct change.
@@ -60,18 +63,73 @@ def validate(raw: dict) -> CodeResult:
     )
 
 
+MAX_CONTEXT_FILES = 3
+MAX_CONTEXT_CHARS = 12_000
+
+
+def _repo_context(repo, hint: str) -> str:
+    """Read-only grounding: the target repo's listing plus the files the design names.
+
+    Everything from the repo is untrusted external content (ADR 0009): file names and file
+    contents are injection-screened before they reach the prompt, and anything that trips the
+    scanner is excluded with a visible note, not silently dropped.
+    """
+    try:
+        listing = repo.list_files()
+    except Exception:  # an unreachable repo must not fail the stage; note it and go on
+        return "Target repository unreachable; the diff could not be grounded in real files."
+    excluded = [p for p in listing
+                if injection.scan(p.replace("-", " ").replace("_", " "))]
+    safe_listing = [p for p in listing if p not in excluded]
+    named = [p for p in safe_listing if p in hint or ("/" in p and p.split("/")[-1] in hint)]
+    blocks = ["Files in the target repository:", *[f"- {p}" for p in safe_listing[:200]]]
+    budget = MAX_CONTEXT_CHARS
+    for path in named[:MAX_CONTEXT_FILES]:
+        got = repo.read_file(path)
+        text = got.get("text", "")
+        if "error" in got or not text:
+            continue
+        if injection.scan(text):
+            excluded.append(path)
+            continue
+        chunk = text[:budget]
+        budget -= len(chunk)
+        blocks.append(f"--- {path} ---\n{chunk}")
+        if budget <= 0:
+            break
+    if excluded:
+        blocks.append("Excluded by injection screening (untrusted external content): "
+                      + ", ".join(excluded))
+    return "\n".join(blocks)
+
+
+class CodeSchema(BaseModel):
+    """Structured-output schema; validate() below remains the contract enforcement."""
+
+    diff: str
+    files_touched: list[str]
+    rationale: str = ""
+    confidence: float
+
+
 class CodeAgent:
     name = "code"
 
-    def __init__(self, llm: LLM) -> None:
+    def __init__(self, llm: LLM, repo=None) -> None:
         self.llm = llm
+        self.repo = repo  # read-only repo reader (integrations.github); None = ungrounded
 
     def run(self, title: str, design_approach: str, requirements: list[str]) -> CodeResult:
         user = (
             f"Ticket: {title}\nDesign: {design_approach}\n"
             f"Requirements:\n- " + "\n- ".join(requirements)
         )
-        res = self.llm.complete(SYSTEM, user, max_tokens=2000)
-        result = validate(parse_json(res, "code"))
-        result.meta = meta_of(res)
+        if self.repo is not None:
+            hint = design_approach + "\n" + "\n".join(requirements)
+            user += ("\n\nRepository context (read-only; the diff must apply against the "
+                     "real target repo):\n" + _repo_context(self.repo, hint))
+        raw, meta = complete_structured(self.llm, SYSTEM, user, CodeSchema, "code",
+                                        max_tokens=2000)
+        result = validate(raw)
+        result.meta = meta
         return result

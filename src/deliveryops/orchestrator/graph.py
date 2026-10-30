@@ -6,6 +6,7 @@ side effects before `interrupt()` because the node body re-executes on resume (A
 """
 from __future__ import annotations
 
+import os
 import time
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -49,7 +50,24 @@ class StageNodes:
 
     # ---------- agent stages ----------
 
+    def _budget_error(self, state: PipelineState, stage: str) -> dict | None:
+        """Per-run cost cap (ADR 0009): fail closed before the next paid model call."""
+        try:
+            cap = float(os.getenv("DELIVERYOPS_MAX_RUN_COST_USD", "1.00"))
+        except ValueError:
+            cap = 0.0
+        if cap <= 0:
+            return None
+        spent = float(state.get("spent_usd", 0.0))
+        if spent >= cap:
+            return self._failed(stage, RuntimeError(
+                f"run budget exceeded: ${spent:.4f} >= cap ${cap:.2f} "
+                "(DELIVERYOPS_MAX_RUN_COST_USD)"))
+        return None
+
     def intake_node(self, state: PipelineState) -> dict:
+        if (failed := self._budget_error(state, "intake")) is not None:
+            return failed
         try:
             result = self.intake.run(state["title"], state["description"])
         except AgentOutputError as e:
@@ -64,6 +82,8 @@ class StageNodes:
         }
 
     def design_node(self, state: PipelineState) -> dict:
+        if (failed := self._budget_error(state, "design")) is not None:
+            return failed
         triage = state.get("triage") or {}
         try:
             result = self.design.run(state["title"], triage.get("requirements", []))
@@ -80,6 +100,8 @@ class StageNodes:
         }
 
     def code_node(self, state: PipelineState) -> dict:
+        if (failed := self._budget_error(state, "code")) is not None:
+            return failed
         triage = state.get("triage") or {}
         design = state.get("design") or {}
         try:
@@ -99,6 +121,8 @@ class StageNodes:
         }
 
     def review_node(self, state: PipelineState) -> dict:
+        if (failed := self._budget_error(state, "review")) is not None:
+            return failed
         patch = state.get("patch") or {}
         design = state.get("design") or {}
         try:
@@ -156,6 +180,7 @@ class StageNodes:
             return {
                 "confidence": design.get("confidence"),
                 "open_questions": len(design.get("open_questions") or []),
+                "grounding_hits": len(design.get("citations") or []),
             }
         if stage == "code":
             patch = state.get("patch") or {}

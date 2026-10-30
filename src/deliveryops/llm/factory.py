@@ -7,10 +7,16 @@ from .fake import FakeLLM
 
 
 def get_llm() -> LLM:
-    """DELIVERYOPS_LLM=anthropic|fake (default: fake, so nothing breaks without a key)."""
-    provider = os.getenv("DELIVERYOPS_LLM", "fake").lower()
-    if provider == "anthropic":
-        from .anthropic_client import AnthropicLLM
+    """DELIVERYOPS_LLM=fake (default, offline) or a real provider via init_chat_model.
 
-        return AnthropicLLM()
+    `chat` (or a provider name for back-compat: anthropic|openai|google|google_genai) builds a
+    ChatModelLLM; DELIVERYOPS_PROVIDER and DELIVERYOPS_MODEL select the backend and model, so
+    the pipeline is model-independent - swapping providers is configuration, not code.
+    """
+    mode = os.getenv("DELIVERYOPS_LLM", "fake").lower()
+    providers = {"anthropic", "openai", "google", "google_genai"}
+    if mode == "chat" or mode in providers:
+        from .chat_model import ChatModelLLM
+
+        return ChatModelLLM(provider=None if mode == "chat" else mode)
     return FakeLLM()

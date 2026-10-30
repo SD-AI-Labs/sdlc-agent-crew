@@ -53,3 +53,17 @@ def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
 
 def is_priced(model: str) -> bool:
     return price_for(model) is not None
+
+# Embedding prices, USD per 1M tokens (list prices). The offline hash embedder is free.
+EMBEDDING_PRICES: dict[str, float] = {
+    "text-embedding-3-small": 0.02,
+    "text-embedding-3-large": 0.13,
+    "text-embedding-ada-002": 0.10,
+    "hash-ngram-1024": 0.0,
+}
+
+
+def embedding_cost_usd(model: str, tokens: int) -> float:
+    """Cost of an embedding call set. Unknown models cost 0.0 and should be added above."""
+    price = EMBEDDING_PRICES.get(model)
+    return 0.0 if price is None else (tokens / 1_000_000) * price

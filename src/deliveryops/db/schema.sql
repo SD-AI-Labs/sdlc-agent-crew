@@ -73,13 +73,18 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE INDEX IF NOT EXISTS outbox_pending_idx ON outbox(delivered_at) WHERE delivered_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_unique_event ON outbox(run_id, type, stage);
 
--- Knowledge layer for retrieval grounding; dimension matches knowledge/embedder.py.
+-- Knowledge layer for retrieval grounding (ADR 0010). `embedding` is dimensionless so
+-- embedders with different output sizes share the table; `embedder` namespaces rows so
+-- switching embedders never mixes incompatible vector spaces. Existing databases need a
+-- recreate (or ALTER) for this change.
 CREATE TABLE IF NOT EXISTS knowledge_chunks (
     id        BIGSERIAL PRIMARY KEY,
     source    TEXT NOT NULL,
     content   TEXT NOT NULL,
-    embedding vector(1024)
+    embedding vector,
+    embedder  TEXT NOT NULL DEFAULT 'hash-ngram-1024'
 );
-CREATE UNIQUE INDEX IF NOT EXISTS knowledge_source_idx ON knowledge_chunks(source);
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_source_idx ON knowledge_chunks(source, embedder);
+-- HNSW: better recall than ivfflat at this corpus size and no lists/training step (ADR 0010).
 CREATE INDEX IF NOT EXISTS knowledge_embedding_idx ON knowledge_chunks
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 10);
+    USING hnsw (embedding vector_cosine_ops);
