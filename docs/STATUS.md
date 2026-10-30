@@ -393,6 +393,102 @@ smoke run - the real worker process started with `PORT` set, `/health` returned 
 counters, other paths returned 404, and the process stopped cleanly. Still not executed:
 a real Cloud Run deployment (no GCP access in this sandbox).
 
+## Update: one branch, three targets (local | gcp | aws), 2026-10-30 (later still)
+
+The two fix branches are gone: `fix/p0-batch` and `fix/production-phase1` were
+fast-forwarded into `main` (16 commits, no merge commit - main had not diverged)
+and deleted. Everything below landed on `main` directly, one commit per step,
+and **nothing was pushed**.
+
+What changed:
+
+1. **Terraform layout** (`3645e38`): the GCP module moved to
+   `deploy/terraform/gcp/`; `deploy/terraform/aws/` is its sibling (below).
+   Historical entries in this file keep the old path - they record what was
+   true when written.
+2. **AWS module** (`621594c`): ECS Fargate + RDS mirroring the GCP module -
+   RDS Postgres 16 (Multi-AZ by default, 7-day PITR backups, deletion
+   protection, not publicly accessible, 5432 only from the task security
+   groups), ECR, an ALB-fronted API service health-checking `/health`, a
+   worker service with no load balancer, a migrate task definition,
+   per-service execution roles split like the GCP service accounts (worker
+   injects only `database-url`; task roles have no policies), secret
+   containers with values added afterwards, and an S3 + DynamoDB remote
+   backend (partial config, per-env key). Two simplifications are stated in
+   the module, not hidden: the default VPC stands in for a dedicated one
+   (tasks take public IPs as their egress path), and the RDS master user is
+   the app user - which is what lets `deliveryops-migrate` run schema.sql's
+   `CREATE EXTENSION` for pgvector, master holding `rds_superuser` (the GCP
+   app user holds the Cloud SQL equivalent). `.terraform/` joined
+   `.gitignore` in the same commit: the AWS provider set is ~700MB of
+   binaries that `init` fetches; they are never committed. (The GCP
+   provider binaries committed by an earlier pass remain in history -
+   untracking them is a separate cleanup, not attempted here.)
+3. **`DELIVERYOPS_DEPLOY_TARGET`** (`f1978b5`): `local` (default) | `gcp` |
+   `aws`, validated in `config.py`. Unknown value = loud error. Cloud
+   targets additionally require `DATABASE_URL`, reject
+   `DELIVERYOPS_LLM=fake` unless `DELIVERYOPS_ALLOW_FAKE_LLM=1`, and log a
+   prominent warning when `DELIVERYOPS_API_TOKENS` is unset (a warning, not
+   an error: a pilot may sit behind IAP / an ALB with OIDC). Local gains no
+   new constraints. Both terraform modules and docker-compose set the
+   variable for their environment. 15 new tests (`tests/test_deploy_target.py`)
+   cover every rule for both cloud targets.
+4. **`deploy/run.sh`** (`347c5af`): one entrypoint. The target is an argument
+   or an interactive prompt (`Run target? [local/gcp/aws] (default local):`;
+   one re-prompt on invalid input, then a non-zero exit). `local` runs the
+   compose stack when docker exists, else starts the API (:8000) and worker
+   (PORT=18099) as uv processes under a trap that stops both with the script.
+   `gcp`/`aws` run `terraform init` (backend config from a per-module
+   `backend.hcl` or `TF_BACKEND_CONFIG_ARGS`) and `terraform plan`; apply
+   happens only under `--apply`.
+5. **Runbook + CI** (`d199549`): `deploy/README.md` restructured around the
+   three targets (shared contract first, then per-target sections; the AWS
+   section covers ECR push, secret values via the aws CLI, and the migrate
+   task via `aws ecs run-task`). The CI terraform job is a matrix validating
+   both modules.
+
+Commands actually executed in this pass:
+
+```
+$ uv run pytest -q                     # 224 passed (was 209; +15 deploy-target tests)
+$ uv run ruff check .                  # All checks passed!
+$ uv run vulture                       # exit 0, no findings
+$ uv run deliveryops-eval --baseline-check
+OK: the gate rejects the naive baseline
+$ terraform fmt -check -recursive deploy/terraform   # clean
+$ terraform -chdir=deploy/terraform/gcp init -backend=false && terraform -chdir=deploy/terraform/gcp validate
+Success! The configuration is valid.
+$ terraform -chdir=deploy/terraform/aws init -backend=false && terraform -chdir=deploy/terraform/aws validate
+Success! The configuration is valid.   # hashicorp/aws ~> 5.0 downloaded for real in this sandbox
+$ printf 'bogus\nnope\n' | deploy/run.sh        # re-prompts once, exits 2
+$ printf '\n' | deploy/run.sh                    # (inside a throwaway network namespace - see below)
+local target, via uv ... Ctrl-C stops the API and the worker.
+$ printf 'aws\n' | deploy/run.sh                 # dispatches to terraform init; stops at the
+                                                 # partial-backend prompt (no backend config given)
+$ TF_BACKEND_CONFIG_ARGS='-backend-config=bucket=no-such-bucket-xyz -backend-config=prefix=deliveryops/test' deploy/run.sh gcp
+                                                 # init reaches the real GCS backend and fails on
+                                                 # missing Google credentials - the sandbox limit
+```
+
+Two testing notes, stated plainly. The `run.sh` local uv branch was executed
+inside a throwaway network namespace (`unshare -rn`) because this sandbox's
+ports 8000/18099 were already held by the earlier smoke-run API/worker, which
+were left running untouched; inside the namespace the branch cold-started
+for real - health check passed, URLs printed - and on SIGINT the trap
+stopped both children (verified: the ports were dead afterwards). And the
+backend-config test caught a real bug in the making: quotes inside
+`TF_BACKEND_CONFIG_ARGS` survive word splitting literally and terraform
+rejects them, so the script's header now documents unquoted values.
+
+Not executed in this pass (and therefore not claimed):
+
+| Area | Status |
+| --- | --- |
+| `terraform apply` / plan against real accounts | **Not run.** No GCP or AWS credentials exist in this sandbox; both cloud paths through `run.sh` stop at backend initialisation, exactly as recorded above. A real `plan` needs credentials plus the required variables (`project_id`/`image`, `image`). |
+| AWS anything beyond validate | **Not run.** No AWS account was touched: no ECR push, no `run-task`, no RDS. The module is validate-clean only - the same status the GCP module had before its first apply, which caught two real bugs only *at* validate time; AWS may have plan/apply-time surprises of its own. |
+| `run.sh` local via docker compose | **Not run** (no Docker in this sandbox). The compose branch is three commands and a print; its first real run is on a machine with Docker. |
+| CI matrix job | **Not run.** The workflow change is committed; GitHub Actions will exercise it on the next push - which has not happened (nothing is pushed). |
+
 ## Reproduce
 
 ```bash

@@ -7,7 +7,7 @@ proposed code change and review**, a human owns **every** gate, and **passing ev
 change to ship**.
 
 > Status: working end to end on the offline model (`DELIVERYOPS_LLM=fake`), and on Claude when a key
-> is present. 209 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
+> is present. 224 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
 > gate-has-teeth check). Intake can pull real Jira Cloud tickets and the code agent can ground its
 > diff in a real GitHub repo (both env-configured, both read-only). With `DATABASE_URL` set, run
 > state is in the Postgres checkpointer, so an API restart no longer loses in-flight runs.
@@ -58,7 +58,7 @@ The per-run report (`/runs/{id}/summary`) is the one-page "what the agent did an
 
 ```bash
 uv sync --extra dev --extra anthropic     # uv owns the venv and the lockfile (Python pinned in .python-version)
-uv run pytest -q                          # 209 tests, offline, no API key
+uv run pytest -q                          # 224 tests, offline, no API key
 uv run deliveryops-eval                   # eval gate on the offline baseline (expected: FAIL)
 uv run vulture                            # dead-code check (config in pyproject.toml)
 uv run deliveryops-api                    # http://localhost:8000/docs
@@ -228,9 +228,12 @@ verified).
 
 ## Deploy
 
-`deploy/` carries the production target: Cloud Run (`deliveryops-api` + `deliveryops-worker`) on
-Cloud SQL Postgres 16 with pgvector, secrets in Secret Manager, Terraform in
-`deploy/terraform/gcp/` and the runbook in `deploy/README.md`. The image runs as a non-root user.
+`deploy/` carries the production targets, picked by `deploy/run.sh [local|gcp|aws]`: Cloud Run +
+Cloud SQL on GCP, ECS Fargate + RDS on AWS - Postgres 16 with pgvector and managed secrets on
+both, Terraform in `deploy/terraform/<target>/`, the runbook in `deploy/README.md`. The app
+knows its target via `DELIVERYOPS_DEPLOY_TARGET`, and startup validation holds cloud targets to
+cloud rules (a database is required; the offline model needs an explicit override). The image
+runs as a non-root user.
 
 ## Observability
 
@@ -261,9 +264,9 @@ src/deliveryops/
   console/       dashboard rendering, approval CLI
   api/           FastAPI app
 evals/golden/    golden tickets
-deploy/          Cloud Run + Cloud SQL: terraform and runbook
+deploy/          run.sh + terraform per target (gcp/, aws/) and the runbook
 docs/            ARCHITECTURE.md, STATUS.md, adr/ (ten decisions)
-tests/           209 tests
+tests/           224 tests
 ```
 
 ## Deeper reading
