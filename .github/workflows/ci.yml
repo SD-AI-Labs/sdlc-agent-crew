@@ -17,6 +17,38 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest -q
 
+  docker:
+    name: docker build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build only: proves the shipped image (Dockerfile + lockfile) still
+      # assembles. Publishing belongs to the deploy pipeline, not CI.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+
+  terraform:
+    name: terraform fmt and validate (${{ matrix.target }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [gcp, aws]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform fmt -check -recursive deploy/terraform
+      # -backend=false: validate the configuration without touching remote
+      # state (CI has no business holding state credentials).
+      - run: terraform -chdir=deploy/terraform/${{ matrix.target }} init -backend=false
+      - run: terraform -chdir=deploy/terraform/${{ matrix.target }} validate
+
   gate-self-check:
     name: eval gate has teeth
     needs: test

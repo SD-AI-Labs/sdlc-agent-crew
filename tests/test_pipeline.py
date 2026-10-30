@@ -5,7 +5,23 @@ import pytest
 
 from deliveryops.orchestrator.pipeline import GateClosed, InsufficientAuthority, RunNotFound
 
-from .conftest import ScriptedLLM, make_pipeline, triage_payload
+from .conftest import (
+    CODE_PAYLOAD,
+    DESIGN_PAYLOAD,
+    REVIEW_PAYLOAD,
+    RaisingLLM,
+    ScriptedLLM,
+    make_pipeline,
+    triage_payload,
+)
+
+
+def _raising_pipeline(fail_kind: str):
+    return make_pipeline(llm=RaisingLLM(
+        fail_kind,
+        intake=triage_payload(), design=DESIGN_PAYLOAD,
+        code=CODE_PAYLOAD, review=REVIEW_PAYLOAD,
+    ))
 
 TICKET = "Login page returns 500 after password reset"
 BODY = "Users who change their password get a 500 error when they log in again."
@@ -77,6 +93,29 @@ def test_malformed_triage_fails_the_run_without_opening_a_gate():
     view = p.start(TICKET, BODY)
     assert view.status == "failed" and view.awaiting is None
     assert view.errors and view.errors[0]["stage"] == "intake"
+
+
+def test_transport_error_at_intake_fails_the_run_instead_of_stranding_it():
+    p = _raising_pipeline("intake")
+    view = p.start(TICKET, BODY)
+    assert view.status == "failed" and view.awaiting is None
+    assert view.errors and view.errors[0]["stage"] == "intake"
+    assert "provider unreachable" in view.errors[0]["error"]
+    assert "failed" in [a.action for a in p.repo.audit(view.run_id)]
+    assert p.repo.get(view.run_id).status == "failed"
+    spans = p.tracer.spans(view.run_id)
+    assert any(not s.ok for s in spans), "a failure span must be recorded"
+    assert p.tracer.metrics()["by_stage"]["intake"]["error_rate"] == 1.0
+
+
+def test_transport_error_mid_run_fails_the_run_at_that_stage():
+    p = _raising_pipeline("design")
+    view = p.start(TICKET, BODY)
+    assert view.status == "awaiting_approval"
+    view = p.resume(view.run_id, "sukhdev", True, "ok", role="senior")
+    assert view.status == "failed" and view.stage == "design"
+    assert view.errors and view.errors[0]["stage"] == "design"
+    assert any(not s.ok and s.stage == "design" for s in p.tracer.spans(view.run_id))
 
 
 def test_failed_run_writes_an_audit_entry():
@@ -170,6 +209,54 @@ def test_one_escalation_row_per_escalated_stage():
         view = p.resume(view.run_id, "sukhdev", True, role="senior")
     stages = [e.stage for e in p.repo.escalations(view.run_id)]
     assert len(stages) == len(set(stages)), stages
+
+
+def test_duplicate_decision_with_the_same_idempotency_key_applies_once(pipeline):
+    view = pipeline.start(TICKET, BODY)
+    first = pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior",
+                            idempotency_key="req-1")
+    assert first.awaiting["stage"] == "design"
+    # A retry of the same request (client never saw the first response) must not
+    # resume the graph again or record a second decision.
+    again = pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior",
+                            idempotency_key="req-1")
+    assert again.awaiting["stage"] == "design"
+    assert [d["stage"] for d in again.decisions] == ["intake"]
+
+
+def test_decision_for_a_gate_that_already_closed_is_gate_closed(pipeline):
+    view = pipeline.start(TICKET, BODY)
+    pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior", stage="intake")
+    # The run has moved to the design gate; a second decision aimed at intake must
+    # not silently land on design.
+    with pytest.raises(GateClosed):
+        pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior", stage="intake")
+
+
+def test_concurrent_decisions_at_one_gate_only_one_takes_effect(pipeline):
+    import threading
+
+    view = pipeline.start(TICKET, BODY)
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def decide():
+        barrier.wait()
+        try:
+            pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior", stage="intake")
+            outcomes.append("ok")
+        except GateClosed:
+            outcomes.append("closed")
+
+    threads = [threading.Thread(target=decide) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(outcomes) == ["closed", "ok"]
+    final = pipeline.view(view.run_id)
+    assert [d["stage"] for d in final.decisions] == ["intake"]
+    assert final.awaiting["stage"] == "design"
 
 
 def test_cost_and_latency_are_tracked_per_run(pipeline):

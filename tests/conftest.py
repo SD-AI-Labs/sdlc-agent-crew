@@ -42,6 +42,29 @@ class RoutingLLM:
         )
 
 
+class RaisingLLM:
+    """Answers like RoutingLLM except for one agent kind, where it raises a
+    transport-style error the way a provider outage surfaces mid-run."""
+
+    name = "raising"
+
+    def __init__(self, fail_kind: str, **payloads: dict) -> None:
+        self.fail_kind = fail_kind
+        self.payloads = payloads
+
+    def complete(self, system, user, *, max_tokens=1000, temperature=0.0):
+        kind = _kind(system)
+        if kind == self.fail_kind:
+            raise ConnectionError(f"provider unreachable while calling {kind}")
+        payload = self.payloads.get(kind)
+        if payload is None:
+            raise AssertionError(f"no payload configured for agent kind {kind!r}")
+        return LLMResult(
+            text=json.dumps(payload), input_tokens=120, output_tokens=45,
+            latency_ms=42.0, model=self.name,
+        )
+
+
 def triage_payload(**over) -> dict:
     base = {
         "type": "bug",

@@ -12,6 +12,7 @@ degrades to lexical retrieval rather than a 500.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
@@ -19,6 +20,8 @@ from dataclasses import dataclass
 
 from .embedder import HashEmbedder, LangChainEmbedder, get_embedder, to_pgvector
 from .library import DOCS, Doc
+
+log = logging.getLogger(__name__)
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
@@ -168,7 +171,9 @@ class ResilientRetriever:
     """Degrade to lexical search when the primary (database-backed) retriever fails.
 
     A Postgres blip or a misconfigured embedder must not 500 the design stage; grounding on the
-    in-memory library is strictly better than failing the run.
+    in-memory library is strictly better than failing the run. Every degradation is logged:
+    silently serving lexical results for a permanently broken pgvector setup would be
+    indistinguishable from healthy vector retrieval.
     """
 
     def __init__(self, primary, fallback: LexicalRetriever) -> None:
@@ -179,7 +184,9 @@ class ResilientRetriever:
     def search(self, query: str, k: int = 3) -> list[Hit]:
         try:
             return self._primary.search(query, k=k)
-        except Exception:
+        except Exception as e:
+            log.warning("retriever %s failed (%s: %s); degrading to lexical fallback",
+                        self._primary.name, type(e).__name__, e)
             return self._fallback.search(query, k=k)
 
 
@@ -191,18 +198,32 @@ def _min_score(backend: str) -> float:
 
 
 def get_retriever():
-    """DELIVERYOPS_RETRIEVER=lexical|pgvector|hybrid (DB-backed modes need DATABASE_URL)."""
+    """DELIVERYOPS_RETRIEVER=lexical|pgvector|hybrid (DB-backed modes need DATABASE_URL).
+
+    Misconfiguration is a loud error, in the same spirit as the Jira adapter: asking for
+    pgvector/hybrid without DATABASE_URL raises instead of silently serving lexical
+    results, and an unrecognised value raises instead of defaulting.
+    """
     choice = os.getenv("DELIVERYOPS_RETRIEVER", "lexical").lower()
     dsn = os.getenv("DATABASE_URL", "")
-    if choice == "pgvector" and dsn:
-        return ResilientRetriever(
-            PgVectorRetriever(dsn, min_score=_min_score("pgvector")), LexicalRetriever()
-        )
-    if choice == "hybrid" and dsn:
+    if choice == "lexical":
+        return LexicalRetriever(min_score=_min_score("lexical"))
+    if choice in ("pgvector", "hybrid"):
+        if not dsn:
+            raise ValueError(
+                f"DELIVERYOPS_RETRIEVER={choice} requires DATABASE_URL; refusing to "
+                "silently fall back to lexical retrieval"
+            )
+        if choice == "pgvector":
+            return ResilientRetriever(
+                PgVectorRetriever(dsn, min_score=_min_score("pgvector")), LexicalRetriever()
+            )
         return ResilientRetriever(
             HybridRetriever(
                 LexicalRetriever(), PgVectorRetriever(dsn), min_score=_min_score("hybrid")
             ),
             LexicalRetriever(),
         )
-    return LexicalRetriever(min_score=_min_score("lexical"))
+    raise ValueError(
+        f"unknown DELIVERYOPS_RETRIEVER {choice!r}: expected 'lexical', 'pgvector', or 'hybrid'"
+    )

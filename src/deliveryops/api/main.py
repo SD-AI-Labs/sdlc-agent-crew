@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -59,11 +59,63 @@ class DecisionIn(BaseModel):
     approve: bool
     comment: str = ""
     role: str = "engineer"
+    # Optional: the gate the caller believes it is answering. A mismatch with the gate
+    # actually open is a 409, so a slow or duplicated request cannot land on the next gate.
+    stage: str | None = None
+
+
+def _load_tokens() -> dict[str, dict]:
+    """DELIVERYOPS_API_TOKENS: a JSON object mapping bearer token -> {name, role}.
+
+    Unset (the default) means no token auth at all - the pre-pilot behaviour, in
+    which approver and role are whatever the request body claims. Malformed JSON
+    or an entry without name/role is a loud startup error: identity config that
+    half-parses would otherwise fail open or closed at random, per request.
+    """
+    raw = os.getenv("DELIVERYOPS_API_TOKENS", "")
+    if not raw:
+        return {}
+    try:
+        tokens = json.loads(raw)
+    except ValueError as e:
+        raise RuntimeError(f"DELIVERYOPS_API_TOKENS is not valid JSON: {e}") from e
+    if not isinstance(tokens, dict):
+        raise RuntimeError(
+            "DELIVERYOPS_API_TOKENS must be a JSON object of token -> {name, role}")
+    for i, identity in enumerate(tokens.values()):
+        if not isinstance(identity, dict) or not identity.get("name") \
+                or not identity.get("role"):
+            raise RuntimeError(
+                f'DELIVERYOPS_API_TOKENS entry #{i} must be {{"name": ..., "role": ...}}')
+    return tokens
 
 
 def create_app(pipeline: Pipeline | None = None) -> FastAPI:
-    app = FastAPI(title="DeliveryOps Agents", version="0.2.0")
+    app = FastAPI(title="DeliveryOps Agents", version="1.0.0")
     pipe = pipeline or get_pipeline()
+    tokens = _load_tokens()
+    protect_reads = os.getenv("DELIVERYOPS_AUTH_PROTECT_READS", "") == "1"
+
+    def _identity(authorization: str | None) -> dict | None:
+        """The caller's token identity, or None when token auth is not configured.
+
+        When it IS configured, a missing or unknown token is a 401 - never a
+        silent fall back to trusting the request body.
+        """
+        if not tokens:
+            return None
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(401, "missing bearer token")
+        identity = tokens.get(authorization.removeprefix("Bearer ").strip())
+        if identity is None:
+            raise HTTPException(401, "unknown bearer token")
+        return identity
+
+    def _read_identity(authorization: str | None) -> None:
+        # Reads stay open in pilot mode unless DELIVERYOPS_AUTH_PROTECT_READS=1:
+        # the dashboard is how the team watches the gates; the writes are what bite.
+        if tokens and protect_reads:
+            _identity(authorization)
 
     def _load_eval_report() -> dict | None:
         path = Path(os.getenv("DELIVERYOPS_EVAL_REPORT", "eval-report.json"))
@@ -79,7 +131,9 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
         return {"status": "ok", "llm": pipe.nodes.intake.llm.name, "runs": len(pipe.repo.list(500))}
 
     @app.post("/tickets", status_code=201)
-    def submit(ticket: TicketIn) -> dict:
+    def submit(ticket: TicketIn,
+               authorization: str | None = Header(default=None)) -> dict:
+        _identity(authorization)
         title, description = ticket.title, ticket.description
         if ticket.ticket_id:
             try:
@@ -91,11 +145,19 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
             title, description = found.title, found.description
         if not title or not description or len(title) < 3 or len(description) < 3:
             raise HTTPException(422, "title and description are required (min 3 chars)")
-        view = pipe.start(title, description)
+        try:
+            view = pipe.start(title, description)
+        except Exception as e:
+            # Stage failures are handled inside the pipeline (the run goes to
+            # 'failed'); anything escaping to here is infrastructure, reported as a
+            # structured 502 rather than a bare 500.
+            raise HTTPException(502, f"pipeline failed to start the run: {e}") from e
         return view.to_dict()
 
     @app.get("/runs")
-    def list_runs(limit: int = 50) -> list[dict]:
+    def list_runs(limit: int = 50,
+                  authorization: str | None = Header(default=None)) -> list[dict]:
+        _read_identity(authorization)
         out = []
         for record in pipe.repo.list(limit):
             out.append({
@@ -109,26 +171,40 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
         return out
 
     @app.get("/runs/{run_id}")
-    def get_run(run_id: str) -> dict:
+    def get_run(run_id: str,
+                authorization: str | None = Header(default=None)) -> dict:
+        _read_identity(authorization)
         try:
             return pipe.view(run_id).to_dict()
         except RunNotFound as e:
             raise HTTPException(404, "run not found") from e
 
     @app.post("/runs/{run_id}/decision")
-    def decide(run_id: str, body: DecisionIn) -> dict:
+    def decide(run_id: str, body: DecisionIn,
+               idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+               authorization: str | None = Header(default=None)) -> dict:
+        identity = _identity(authorization)
+        # With token auth, the identity IS the token's: the body's approver and
+        # role are ignored, so authority cannot be borrowed by typing it.
+        approver = identity["name"] if identity else body.approver
+        role = identity["role"] if identity else body.role
         try:
-            return pipe.resume(run_id, body.approver, body.approve, body.comment,
-                               body.role).to_dict()
+            return pipe.resume(run_id, approver, body.approve, body.comment,
+                               role, stage=body.stage,
+                               idempotency_key=idempotency_key).to_dict()
         except RunNotFound as e:
             raise HTTPException(404, "run not found") from e
         except GateClosed as e:
             raise HTTPException(409, str(e)) from e
         except InsufficientAuthority as e:
             raise HTTPException(403, str(e)) from e
+        except Exception as e:
+            raise HTTPException(502, f"pipeline failed to resume the run: {e}") from e
 
     @app.get("/runs/{run_id}/patch", response_class=PlainTextResponse)
-    def get_patch(run_id: str) -> str:
+    def get_patch(run_id: str,
+                  authorization: str | None = Header(default=None)) -> str:
+        _read_identity(authorization)
         try:
             return pipe.apply_patch(run_id)
         except RunNotFound as e:
@@ -137,7 +213,9 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
             raise HTTPException(409, str(e)) from e
 
     @app.get("/runs/{run_id}/summary", response_class=PlainTextResponse)
-    def get_summary(run_id: str) -> str:
+    def get_summary(run_id: str,
+                    authorization: str | None = Header(default=None)) -> str:
+        _read_identity(authorization)
         try:
             view = pipe.view(run_id)
         except RunNotFound as e:
@@ -145,7 +223,8 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
         return executive_summary(view, pipe.tracer, _load_eval_report())
 
     @app.get("/metrics")
-    def metrics() -> dict:
+    def metrics(authorization: str | None = Header(default=None)) -> dict:
+        _read_identity(authorization)
         base = pipe.tracer.metrics()
         runs = pipe.repo.list(500)
         base["runs"] = {
@@ -166,7 +245,8 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
         return base
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    def dashboard() -> str:
+    def dashboard(authorization: str | None = Header(default=None)) -> str:
+        _read_identity(authorization)
         return render_dashboard(pipe.repo.list(50), pipe.tracer.metrics(),
                                 pipe.repo.escalations())
 
@@ -177,6 +257,11 @@ app = create_app()
 
 
 def run() -> None:
+    # One validation pass over the whole env surface before serving: a config
+    # typo should refuse the boot, not surface as a failed first request.
+    from ..config import validate_config
+
+    validate_config()
     import uvicorn
 
     uvicorn.run("deliveryops.api.main:app", host="0.0.0.0",

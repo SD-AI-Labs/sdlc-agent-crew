@@ -6,6 +6,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from deliveryops.evals.gates import RETRIEVAL_THRESHOLDS, retrieval_check
 from deliveryops.evals.runner import run_retrieval_eval
 from deliveryops.guardrails.policy import evaluate
@@ -119,6 +121,21 @@ def test_db_failure_degrades_to_lexical():
     assert hits and all(isinstance(h, Hit) for h in hits)
 
 
+def test_db_failure_degradation_is_logged_not_silent(caplog):
+    import logging
+
+    class Boom:
+        name = "boom"
+
+        def search(self, query, k=3):
+            raise ConnectionError("database is down")
+
+    resilient = ResilientRetriever(Boom(), LexicalRetriever())
+    with caplog.at_level(logging.WARNING, logger="deliveryops.knowledge.retriever"):
+        resilient.search("rollback policy", k=3)
+    assert any("degrading to lexical" in r.message for r in caplog.records)
+
+
 def test_retriever_factory_modes(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("DELIVERYOPS_RETRIEVER", raising=False)
@@ -129,6 +146,17 @@ def test_retriever_factory_modes(monkeypatch):
     assert isinstance(get_retriever(), ResilientRetriever)
     monkeypatch.setenv("DELIVERYOPS_RETRIEVER", "pgvector")
     assert isinstance(get_retriever(), ResilientRetriever)
+
+
+def test_retriever_factory_misconfiguration_is_a_loud_error(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    for mode in ("pgvector", "hybrid"):
+        monkeypatch.setenv("DELIVERYOPS_RETRIEVER", mode)
+        with pytest.raises(ValueError, match="requires DATABASE_URL"):
+            get_retriever()
+    monkeypatch.setenv("DELIVERYOPS_RETRIEVER", "vecotr")
+    with pytest.raises(ValueError, match="unknown DELIVERYOPS_RETRIEVER"):
+        get_retriever()
 
 
 # ---------- ingest hygiene ----------

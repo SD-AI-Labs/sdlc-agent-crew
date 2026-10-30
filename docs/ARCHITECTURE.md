@@ -130,7 +130,7 @@ Resume carries `{approver, approve, comment, role}`. If the gate is escalated, a
 | `agent_calls` | per-call telemetry: model, tokens, latency, cost, ok | FK to `runs` — the run row is written before the first span |
 | `escalations` | escalation queue with risk and reasons | one row per escalated stage, written when the gate opens |
 | `outbox` | durable handoff events | unique on `(run_id, type, stage)`; `delivered_at` set by the worker |
-| `knowledge_chunks` | process docs + 1024-dim embedding | unique on `source`; ivfflat cosine index |
+| `knowledge_chunks` | process docs + dimensionless embedding, namespaced by `embedder` | unique on `(source, embedder)`; HNSW cosine index |
 
 Cost is computed at write time from `llm/pricing.py`; an unknown model is reported as unpriced
 rather than silently costed at zero.
@@ -140,6 +140,7 @@ rather than silently costed at zero.
 | Failure | Behaviour | Why |
 | --- | --- | --- |
 | Model returns non-JSON or violates the contract | run → `failed`, no gate opens, audit entry written | a gate you can walk past with junk is not a gate |
+| LLM provider/transport failure (timeout, 5xx, auth) | run → `failed`, audit entry + a tracer span with `ok=False`; the API answers a structured 502, never a bare 500 | a run must never strand in `submitted`; failure is a recorded outcome, and `/metrics` error rate must be able to move |
 | Postgres unavailable mid-run | API surfaces the error; in-memory repo keeps offline use working | persistence is not allowed to silently drop audit rows |
 | API restarts mid-run | with the Postgres checkpointer (default when `DATABASE_URL` is set) the run resumes from the open gate; with `DELIVERYOPS_CHECKPOINTER=memory` it stays `awaiting_approval` and cannot be resumed | durable execution state, not a process-memory promise |
 | Worker down | events accumulate undelivered in `outbox`; delivery resumes on restart | at-least-once, ordered by insert id |
@@ -162,5 +163,7 @@ rather than silently costed at zero.
 - No auto-approve path, not even for trivial changes. Autonomy would be a policy change backed by
   eval evidence, not a code shortcut.
 - No patch execution. No sandbox is built because no code is applied.
-- No multi-tenancy or auth. `role` is a claim, not an identity.
+- No multi-tenancy. Auth is pilot-grade only: optional bearer tokens
+  (`DELIVERYOPS_API_TOKENS`) bind a decision to a named identity and role; without them,
+  `role` is a claim, not an identity. Real deployments front the API with IAP/OAuth.
 - No event bus beyond the outbox. One database is the consistency boundary on purpose (ADR 0003).

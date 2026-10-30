@@ -1,8 +1,10 @@
 """Review agent: proposed diff -> findings + verdict.
 
-Local implementation of the specialist review that GraphForge exposes as MCP tools. If
-DELIVERYOPS_REVIEW=mcp is set, the same shape is fetched from the graphforge MCP server instead
-(see mcp_server/client.py), so the pipeline does not care which reviewer answered.
+The review is a structured LLM call through the shared LLM protocol, validated against
+the output contract in validate(). On top of the model's findings, a deterministic
+static scan of the diff (static_scan) runs: a critical scanner finding - a secret-shaped
+assignment in an added line - forces a request_changes verdict even when the model
+review is optimistic.
 """
 from __future__ import annotations
 

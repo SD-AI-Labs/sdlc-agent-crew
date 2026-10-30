@@ -294,6 +294,236 @@ retriever=lexical cases=20 passed=True
 Still not executed: any real embedding/LLM API call, `--retrieval` against a live database,
 `docker compose up` with the new schema, and everything in the earlier "not executed" lists.
 
+## Update: production Phase 1, 2026-10-30
+
+Branch `fix/production-phase1` (from `fix/p0-batch`; not pushed). Implements Phase 1 of the
+production plan: make the deployment real - terraform correctness, connection pooling,
+migrations, startup config validation, pilot API identity, and real gate notifications.
+
+Environment for this pass: Linux x86_64 sandbox, Python 3.12 (uv), terraform 1.9.8 (downloaded
+locally for fmt/validate only). **No Docker and no GCP access in this sandbox** - the "not
+executed" list below is correspondingly long, and nothing here claims a deploy happened.
+
+What changed:
+
+1. **Terraform** (`deploy/terraform`, commit `2b67c16`): GCS remote backend (partial config -
+   bucket/prefix per environment at init); model env drift fixed (`DELIVERYOPS_LLM=chat` +
+   `DELIVERYOPS_PROVIDER`/`DELIVERYOPS_MODEL` variables, replacing `fake`/"flip to anthropic");
+   Cloud SQL REGIONAL availability, backups with PITR + 7 retained, Sunday 03:00 UTC
+   maintenance window, disk autoresize; worker pinned to 1 always-on instance with
+   `cpu_idle = false`; API scaling explicit with the connection budget
+   (instances x `DELIVERYOPS_DB_POOL_MAX`) in a comment; runtime identities split (API SA reads
+   all secrets, worker SA only `database-url`); new `deliveryops-migrate` Cloud Run v2 job;
+   provider lock file committed; `deploy/README.md` updated (backend init, migrate step,
+   worker note).
+2. **Connection pooling** (`204d637`): `PostgresRepository` and `PostgresOutbox` check
+   connections out of one lazily-created `psycopg_pool` pool per DSN instead of
+   `psycopg.connect()` per call; sizes from `DELIVERYOPS_DB_POOL_MIN/MAX` (defaults 1/8).
+   Dependency is now `psycopg[binary,pool]`. In-memory paths untouched.
+3. **Migrations runner** (`2ccd45b`): `deliveryops-migrate` console script (`db/migrate.py`) -
+   `schema_migrations` table, schema.sql applied as version 1 when unrecorded (every statement
+   verified idempotent), then `PostgresSaver.setup()`. Compose gains a one-shot `migrate`
+   service that api/worker wait on; the initdb mount stays.
+4. **Startup config validation** (`75f5181`): `deliveryops/config.py`, called by the API and
+   worker entry points. Aggregates every env problem (unknown mode/provider/embedder/
+   retriever values, retriever/checkpointer vs `DATABASE_URL`, numeric knobs, Jira partial
+   config via the adapter's own constructor) and logs a redacted summary - secrets appear only
+   as set/unset.
+5. **Pilot API identity** (`c66347c`): `DELIVERYOPS_API_TOKENS` (JSON token -> {name, role}),
+   off by default. When set: mutating endpoints require `Authorization: Bearer <token>`
+   (401 otherwise), decision approver/role come from the token and body values are ignored,
+   escalated gates still 403 on the token's role, reads open unless
+   `DELIVERYOPS_AUTH_PROTECT_READS=1`, `/health` always open. Malformed token config is a
+   loud startup error. README + `.env.example` document it.
+6. **Slack gate notifications + worker hardening** (`d5de15c`): `notify()` posts the gate
+   event as JSON to `DELIVERYOPS_SLACK_WEBHOOK_URL` via stdlib urllib when set (log-only
+   otherwise); failures are logged and swallowed. The poll loop wraps `run_once` in
+   try/except with exponential backoff (cap 30s) instead of dying on a database hiccup.
+7. **CI** (`26933b2`): new `docker` job (build only, no push) and `terraform` job
+   (terraform 1.9.8 pinned: `fmt -check`, `init -backend=false`, `validate`). Existing jobs
+   untouched.
+
+Commands actually executed in this pass:
+
+```
+$ uv run pytest -q                     # 206 passed (was 173 on fix/p0-batch; +33 new)
+$ uv run ruff check .                  # All checks passed!
+$ uv run vulture                       # exit 0, no findings
+$ uv run deliveryops-eval --baseline-check
+OK: the gate rejects the naive baseline
+$ terraform fmt -check -recursive deploy/terraform   # clean (after fmt)
+$ terraform init -backend=false && terraform validate
+Success! The configuration is valid.
+$ uv run deliveryops-migrate           # no DATABASE_URL: refuses loudly, as designed
+```
+
+`terraform validate` earned its keep: it caught **two pre-existing bugs** in the original
+configuration - the worker's `INGRESS_TRAFFIC_NONE` is not a legal value for a Cloud Run v2
+service (now `INGRESS_TRAFFIC_INTERNAL_ONLY`), and `replication { auto {} }` on one line was
+not fmt-parseable. Both are fixed in the terraform commit.
+
+Not executed in this pass (and therefore not claimed):
+
+| Area | Status |
+| --- | --- |
+| `terraform apply` / any GCP call | **Not run.** No GCP access in this sandbox; validate + fmt only. The deploy remains unproven end to end. |
+| Docker build / `docker compose up` | **Not run** (no Docker). The new compose `migrate` service and the CI `docker` job are unexercised; the CI job's first run on GitHub is their first real test. |
+| Real Postgres for the pool / migrate | **Not run.** Pooling and the migrate runner are unit-tested against faked `psycopg`/`psycopg_pool`; `PostgresSaver.setup()` inside `deliveryops-migrate` has not run against a live database. |
+| Slack webhook | **Not posted.** `urllib.request.urlopen` is stubbed in tests; no real Slack workspace received a message. |
+| Worker as a Cloud Run *service* | **Known unresolved gap.** Validate passes, but a v2 service's container must listen on `$PORT` and `deliveryops-worker` serves no HTTP - a real deploy would still need a health endpoint on the worker or the event-driven job conversion the production plan prefers. Recorded here rather than papered over. |
+| Secret *versions* pinning | Not done (Phase 1 plan item 1.6): services still reference `latest`. Rotation safety is unchanged from before this pass. |
+| `DELIVERYOPS_EMBEDDER` factory default | `get_embedder()` itself still maps unknown values to the hash embedder silently; startup validation now rejects them for the API and worker entry points, but the eval runner and knowledge ingest do not call `validate_config()`. |
+
+### Addendum (same day): the worker `$PORT` gap above is closed
+
+`deliveryops-worker` now serves HTTP when `PORT` is set: a stdlib
+`ThreadingHTTPServer` in a daemon thread answers `GET /health` with the poll loop's
+liveness (uptime, poll count, last successful poll, last error, delivered total) from a
+shared `HealthState` the loop updates on every poll and failure. One route only -
+anything else is 404 - and with no `PORT` set nothing listens, so local and compose
+behaviour is unchanged. The terraform worker service now declares
+`ports { container_port = 8080 }` to match. The event-driven job conversion from the
+production plan remains the longer-term option; this removes the deploy blocker without
+changing the worker's shape.
+
+Executed for this addendum: `uv run pytest -q` (209 passed, +3 health tests over a real
+socket), `ruff` clean, `vulture` clean (the two `BaseHTTPRequestHandler` hooks added to
+the framework-names ignore list), `terraform fmt -check` + `validate` clean, and a live
+smoke run - the real worker process started with `PORT` set, `/health` returned live poll
+counters, other paths returned 404, and the process stopped cleanly. Still not executed:
+a real Cloud Run deployment (no GCP access in this sandbox).
+
+## Update: one branch, three targets (local | gcp | aws), 2026-10-30 (later still)
+
+The two fix branches are gone: `fix/p0-batch` and `fix/production-phase1` were
+fast-forwarded into `main` (16 commits, no merge commit - main had not diverged)
+and deleted. Everything below landed on `main` directly, one commit per step,
+and **nothing was pushed**.
+
+What changed:
+
+1. **Terraform layout** (`3645e38`): the GCP module moved to
+   `deploy/terraform/gcp/`; `deploy/terraform/aws/` is its sibling (below).
+   Historical entries in this file keep the old path - they record what was
+   true when written.
+2. **AWS module** (`621594c`): ECS Fargate + RDS mirroring the GCP module -
+   RDS Postgres 16 (Multi-AZ by default, 7-day PITR backups, deletion
+   protection, not publicly accessible, 5432 only from the task security
+   groups), ECR, an ALB-fronted API service health-checking `/health`, a
+   worker service with no load balancer, a migrate task definition,
+   per-service execution roles split like the GCP service accounts (worker
+   injects only `database-url`; task roles have no policies), secret
+   containers with values added afterwards, and an S3 + DynamoDB remote
+   backend (partial config, per-env key). Two simplifications are stated in
+   the module, not hidden: the default VPC stands in for a dedicated one
+   (tasks take public IPs as their egress path), and the RDS master user is
+   the app user - which is what lets `deliveryops-migrate` run schema.sql's
+   `CREATE EXTENSION` for pgvector, master holding `rds_superuser` (the GCP
+   app user holds the Cloud SQL equivalent). `.terraform/` joined
+   `.gitignore` in the same commit: the AWS provider set is ~700MB of
+   binaries that `init` fetches; they are never committed. (The GCP
+   provider binaries committed by an earlier pass remain in history -
+   untracking them is a separate cleanup, not attempted here.)
+3. **`DELIVERYOPS_DEPLOY_TARGET`** (`f1978b5`): `local` (default) | `gcp` |
+   `aws`, validated in `config.py`. Unknown value = loud error. Cloud
+   targets additionally require `DATABASE_URL`, reject
+   `DELIVERYOPS_LLM=fake` unless `DELIVERYOPS_ALLOW_FAKE_LLM=1`, and log a
+   prominent warning when `DELIVERYOPS_API_TOKENS` is unset (a warning, not
+   an error: a pilot may sit behind IAP / an ALB with OIDC). Local gains no
+   new constraints. Both terraform modules and docker-compose set the
+   variable for their environment. 15 new tests (`tests/test_deploy_target.py`)
+   cover every rule for both cloud targets.
+4. **`deploy/run.sh`** (`347c5af`): one entrypoint. The target is an argument
+   or an interactive prompt (`Run target? [local/gcp/aws] (default local):`;
+   one re-prompt on invalid input, then a non-zero exit). `local` runs the
+   compose stack when docker exists, else starts the API (:8000) and worker
+   (PORT=18099) as uv processes under a trap that stops both with the script.
+   `gcp`/`aws` run `terraform init` (backend config from a per-module
+   `backend.hcl` or `TF_BACKEND_CONFIG_ARGS`) and `terraform plan`; apply
+   happens only under `--apply`.
+5. **Runbook + CI** (`d199549`): `deploy/README.md` restructured around the
+   three targets (shared contract first, then per-target sections; the AWS
+   section covers ECR push, secret values via the aws CLI, and the migrate
+   task via `aws ecs run-task`). The CI terraform job is a matrix validating
+   both modules.
+
+Commands actually executed in this pass:
+
+```
+$ uv run pytest -q                     # 224 passed (was 209; +15 deploy-target tests)
+$ uv run ruff check .                  # All checks passed!
+$ uv run vulture                       # exit 0, no findings
+$ uv run deliveryops-eval --baseline-check
+OK: the gate rejects the naive baseline
+$ terraform fmt -check -recursive deploy/terraform   # clean
+$ terraform -chdir=deploy/terraform/gcp init -backend=false && terraform -chdir=deploy/terraform/gcp validate
+Success! The configuration is valid.
+$ terraform -chdir=deploy/terraform/aws init -backend=false && terraform -chdir=deploy/terraform/aws validate
+Success! The configuration is valid.   # hashicorp/aws ~> 5.0 downloaded for real in this sandbox
+$ printf 'bogus\nnope\n' | deploy/run.sh        # re-prompts once, exits 2
+$ printf '\n' | deploy/run.sh                    # (inside a throwaway network namespace - see below)
+local target, via uv ... Ctrl-C stops the API and the worker.
+$ printf 'aws\n' | deploy/run.sh                 # dispatches to terraform init; stops at the
+                                                 # partial-backend prompt (no backend config given)
+$ TF_BACKEND_CONFIG_ARGS='-backend-config=bucket=no-such-bucket-xyz -backend-config=prefix=deliveryops/test' deploy/run.sh gcp
+                                                 # init reaches the real GCS backend and fails on
+                                                 # missing Google credentials - the sandbox limit
+```
+
+Two testing notes, stated plainly. The `run.sh` local uv branch was executed
+inside a throwaway network namespace (`unshare -rn`) because this sandbox's
+ports 8000/18099 were already held by the earlier smoke-run API/worker, which
+were left running untouched; inside the namespace the branch cold-started
+for real - health check passed, URLs printed - and on SIGINT the trap
+stopped both children (verified: the ports were dead afterwards). And the
+backend-config test caught a real bug in the making: quotes inside
+`TF_BACKEND_CONFIG_ARGS` survive word splitting literally and terraform
+rejects them, so the script's header now documents unquoted values.
+
+Not executed in this pass (and therefore not claimed):
+
+| Area | Status |
+| --- | --- |
+| `terraform apply` / plan against real accounts | **Not run.** No GCP or AWS credentials exist in this sandbox; both cloud paths through `run.sh` stop at backend initialisation, exactly as recorded above. A real `plan` needs credentials plus the required variables (`project_id`/`image`, `image`). |
+| AWS anything beyond validate | **Not run.** No AWS account was touched: no ECR push, no `run-task`, no RDS. The module is validate-clean only - the same status the GCP module had before its first apply, which caught two real bugs only *at* validate time; AWS may have plan/apply-time surprises of its own. |
+| `run.sh` local via docker compose | **Not run** (no Docker in this sandbox). The compose branch is three commands and a print; its first real run is on a machine with Docker. |
+| CI matrix job | **Not run.** The workflow change is committed; GitHub Actions will exercise it on the next push - which has not happened (nothing is pushed). |
+
+## Addendum (2026-10-30, late): provider binaries purged from history
+
+The GCP provider binaries under `deploy/terraform/gcp/.terraform/` (a 117 MB
+`terraform-provider-google` binary - over GitHub's 100 MB per-file limit, so a push
+would have been rejected - plus an 18 MB random provider) were tracked in the local
+commits. They entered in the worker `$PORT` commit via a `git add -A` after a local
+`terraform validate` run, before the `.terraform/` ignore rule existed; the later
+`git mv` carried them along. Because those commits had never been pushed, the history
+was rewritten with `git filter-repo` (paths `*/.terraform/*` stripped) instead of only
+untracking them going forward. Result: pack size 136 MB -> 0.4 MB, all 26 commits and
+their content preserved, `.gitignore` now uses `**/.terraform/`. Two consequences worth
+knowing: commit hashes from the production-readiness commit onward changed (its tree is
+byte-identical to the pushed original - verified with an empty diff - so the divergence
+is hash-only and reconciles trivially at push time), and a pre-rewrite bundle backup was
+kept outside the repo until the rewritten history is pushed. `terraform init` re-downloads
+providers on demand; nothing functional changed.
+
+## v1.0.0 freeze (2026-10-30)
+
+The tree at tag `v1.0.0` is the first frozen release. This pass was documentation and
+release mechanics only - no behaviour changes: `pyproject.toml` and the API version go
+0.2.0 -> 1.0.0, `CHANGELOG.md` added, README refreshed (release banner, the migrate
+service in the compose layout, ADR 0010 added to the decisions table), and
+`docs/ARCHITECTURE.md` corrected where it had drifted from the code (pilot token auth in
+the "deliberately does not do" list; LLM transport failures in the failure-semantics
+table). Everything in the earlier sections stands as the record of what was executed;
+the freeze verification is: `uv run pytest -q` (224 passed), `ruff` clean, `vulture`
+clean, `deliveryops-eval --baseline-check` OK, and a live local run of the API + worker
+with a ticket walked through all four gates to `approved` and its patch released.
+
+Frozen knowing the following are open, by decision rather than by accident: the
+real-model eval has never been run (needs `ANTHROPIC_API_KEY`); neither cloud target has
+been applied to a real account; the eval gate covers intake only; the diagnosis stage
+(logs / change-history / repo-search tools) discussed for v2 does not exist yet.
+
 ## Reproduce
 
 ```bash

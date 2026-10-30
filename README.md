@@ -6,8 +6,11 @@ An agentic software-delivery pipeline: a ticket moves through **intake triage, t
 proposed code change and review**, a human owns **every** gate, and **passing evals is what allows a
 change to ship**.
 
+> **v1.0.0** — the first frozen release: the four-gate pipeline, eval gate, guardrails, MCP layer,
+> Jira/GitHub adapters, and the local/GCP/AWS deploy targets below. See `CHANGELOG.md`.
+>
 > Status: working end to end on the offline model (`DELIVERYOPS_LLM=fake`), and on Claude when a key
-> is present. 144 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
+> is present. 224 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
 > gate-has-teeth check). Intake can pull real Jira Cloud tickets and the code agent can ground its
 > diff in a real GitHub repo (both env-configured, both read-only). With `DATABASE_URL` set, run
 > state is in the Postgres checkpointer, so an API restart no longer loses in-flight runs.
@@ -58,7 +61,7 @@ The per-run report (`/runs/{id}/summary`) is the one-page "what the agent did an
 
 ```bash
 uv sync --extra dev --extra anthropic     # uv owns the venv and the lockfile (Python pinned in .python-version)
-uv run pytest -q                          # 144 tests, offline, no API key
+uv run pytest -q                          # 224 tests, offline, no API key
 uv run deliveryops-eval                   # eval gate on the offline baseline (expected: FAIL)
 uv run vulture                            # dead-code check (config in pyproject.toml)
 uv run deliveryops-api                    # http://localhost:8000/docs
@@ -179,7 +182,9 @@ cp .env.example .env
 docker compose up --build      # db (pgvector) + knowledge ingest + api + outbox worker
 ```
 
-- `db`: Postgres 16 with pgvector, schema applied on first boot (`db/schema.sql`).
+- `db`: Postgres 16 with pgvector.
+- `migrate`: one-shot `deliveryops-migrate` - version-tracked schema plus the LangGraph
+  checkpointer tables; `api` and `worker` wait for it to complete.
 - `knowledge`: one-shot ingestion of the process library into `knowledge_chunks`.
 - `api`: FastAPI on :8000, `DELIVERYOPS_RETRIEVER=hybrid` (lexical + vector, RRF) and
   `DELIVERYOPS_CHECKPOINTER=postgres` when the database is present, so in-flight runs survive an
@@ -208,11 +213,32 @@ by role, patch-trust rules (the diff, not the model's claim, defines touched fil
 scan on every proposed diff, and a per-run cost cap (`DELIVERYOPS_MAX_RUN_COST_USD`, default
 1.00, 0 disables) that fails the run closed before the next paid call.
 
+## API identity (pilot)
+
+By default the API has no auth: a decision's `approver` and `role` are whatever the request body
+claims. Setting `DELIVERYOPS_API_TOKENS` turns on bearer-token identity for a pilot deployment -
+a JSON object mapping each token to the person and role it speaks for:
+
+```bash
+export DELIVERYOPS_API_TOKENS='{"<token>": {"name": "alice", "role": "senior"}}'
+```
+
+Mutating endpoints (`POST /tickets`, `POST /runs/{id}/decision`) then require
+`Authorization: Bearer <token>` (missing or unknown token: 401), and a decision's approver and
+role are taken **from the token** - the body's values are ignored, so authority cannot be
+borrowed by typing it. Reads stay open unless `DELIVERYOPS_AUTH_PROTECT_READS=1` (`/health`
+always stays open for probes). This is a pilot mechanism, not an identity provider: real
+deployments put IAP or OAuth in front (see `docs/STATUS.md` for exactly what is and isn't
+verified).
+
 ## Deploy
 
-`deploy/` carries the production target: Cloud Run (`deliveryops-api` + `deliveryops-worker`) on
-Cloud SQL Postgres 16 with pgvector, secrets in Secret Manager, Terraform in
-`deploy/terraform/` and the runbook in `deploy/README.md`. The image runs as a non-root user.
+`deploy/` carries the production targets, picked by `deploy/run.sh [local|gcp|aws]`: Cloud Run +
+Cloud SQL on GCP, ECS Fargate + RDS on AWS - Postgres 16 with pgvector and managed secrets on
+both, Terraform in `deploy/terraform/<target>/`, the runbook in `deploy/README.md`. The app
+knows its target via `DELIVERYOPS_DEPLOY_TARGET`, and startup validation holds cloud targets to
+cloud rules (a database is required; the offline model needs an explicit override). The image
+runs as a non-root user.
 
 ## Observability
 
@@ -243,9 +269,9 @@ src/deliveryops/
   console/       dashboard rendering, approval CLI
   api/           FastAPI app
 evals/golden/    golden tickets
-deploy/          Cloud Run + Cloud SQL: terraform and runbook
-docs/            ARCHITECTURE.md, STATUS.md, adr/ (nine decisions)
-tests/           144 tests
+deploy/          run.sh + terraform per target (gcp/, aws/) and the runbook
+docs/            ARCHITECTURE.md, STATUS.md, adr/ (ten decisions)
+tests/           224 tests
 ```
 
 ## Deeper reading
@@ -267,6 +293,7 @@ tests/           144 tests
 | 0007 | Jira and GitHub are env-configured adapters; the mock stays the default |
 | 0008 | Model-independent LLM layer; full agent loops evaluated and deferred |
 | 0009 | Guardrails for untrusted external content |
+| 0010 | Retrieval credibility: real embeddings, hybrid fusion, measured recall gates |
 
 ## Known limitations
 
@@ -274,8 +301,10 @@ tests/           144 tests
   checkpointer is the default and in-flight runs resume after a restart. In the no-database
   in-memory mode, restarting the API still loses in-flight runs - by design, that mode is for
   tests and demos.
-- **No authentication or multi-tenancy.** The API is a single-tenant demo; `role` is asserted, not
-  verified by an identity provider. Rate limiting and authn belong to the deployment target
+- **Pilot-grade authentication only; no multi-tenancy.** Optional bearer tokens
+  (`DELIVERYOPS_API_TOKENS`, see "API identity") bind decisions to a named identity, but tokens
+  are shared secrets, not an identity provider; `role` is verified against the token, not
+  against an IdP. Rate limiting and real authn belong to the deployment target
   (IAP / API gateway), per ADR 0009.
 - **The dashboard is read-only.** Approvals go through the API or the CLI.
 - **20 golden tickets.** A floor, not a target; it should grow from real failures.

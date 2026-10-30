@@ -1,0 +1,11 @@
+# Keep local state and secrets out of the build context (the Dockerfile copies the
+# whole tree, so anything not listed here ships in the image).
+.git
+.venv
+.env
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+eval-report.json
