@@ -79,7 +79,11 @@ class InMemoryRepository:
         return sorted(self._runs.values(), key=lambda r: r.created_at, reverse=True)[:limit]
 
     def append_audit(self, entry: AuditEntry) -> None:
-        self._audit.setdefault(entry.run_id, []).append(entry)
+        # Idempotent, mirroring the Postgres ON CONFLICT DO NOTHING: replaying a run's
+        # audit (e.g. a fresh Pipeline persisting after a restart) must not duplicate.
+        entries = self._audit.setdefault(entry.run_id, [])
+        if entry not in entries:
+            entries.append(entry)
 
     def audit(self, run_id: str) -> list[AuditEntry]:
         return list(self._audit.get(run_id, []))
@@ -163,7 +167,8 @@ class PostgresRepository:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO audit_events (run_id, ts, actor, action, detail) "
-                "VALUES (%s, to_timestamp(%s), %s, %s, %s)",
+                "VALUES (%s, to_timestamp(%s), %s, %s, %s) "
+                "ON CONFLICT (run_id, ts, actor, action) DO NOTHING",
                 (entry.run_id, entry.ts, entry.actor, entry.action, json.dumps(entry.detail)),
             )
             conn.commit()

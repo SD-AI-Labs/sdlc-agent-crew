@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
     detail    JSONB       NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS audit_events_run_idx ON audit_events(run_id, ts);
+-- Natural key: re-persisting a run (e.g. a fresh process after a restart) replays its
+-- audit entries, and the insert is ON CONFLICT DO NOTHING, so the log stays exactly-once.
+CREATE UNIQUE INDEX IF NOT EXISTS audit_events_natural_idx
+    ON audit_events(run_id, ts, actor, action);
 
 CREATE OR REPLACE FUNCTION audit_events_immutable() RETURNS trigger AS $$
 BEGIN RAISE EXCEPTION 'audit_events is append-only'; END $$ LANGUAGE plpgsql;

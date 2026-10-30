@@ -85,7 +85,6 @@ class Pipeline:
             outbox=self.outbox,
         )
         self.graph = build_graph(self.nodes, checkpointer)
-        self._persisted_audit: dict[str, int] = {}
         # One lock per run serialises gate decisions: a decision is check-then-act
         # (read the open gate, then resume the graph), so two concurrent calls for the
         # same run must not interleave or both would resume the same interrupt.
@@ -224,13 +223,16 @@ class Pipeline:
         record.outcome = view.status
         self.repo.save(record)
 
-        already = self._persisted_audit.get(run_id, 0)
+        # How much of the audit is already stored is read back from the repository,
+        # never remembered in process memory: after a restart a fresh Pipeline instance
+        # would otherwise re-append the run's entire history. append_audit is also
+        # idempotent in both repositories, as a second line of defence.
+        already = len(self.repo.audit(run_id))
         for item in view.audit[already:]:
             self.repo.append_audit(
                 AuditEntry(run_id, float(item.get("ts", 0.0)), item.get("actor", "system"),
                            item.get("action", ""), item.get("detail", {}))
             )
-        self._persisted_audit[run_id] = len(view.audit)
 
         # Escalations are recorded when the gate opens (above), which is the only place they can
         # appear; recording them again on decision produced duplicate queue rows.

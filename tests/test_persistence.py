@@ -50,6 +50,28 @@ def test_every_persisted_row_belongs_to_a_known_run():
     assert all(entry.run_id == view.run_id for entry in repo.audit(view.run_id))
 
 
+def test_repersisting_after_a_restart_does_not_duplicate_audit():
+    """Regression: the persisted-audit counter used to live in process memory, so a
+    fresh Pipeline (an API restart) re-appended the run's whole audit history."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    repo = InMemoryRepository()
+    saver = InMemorySaver()
+    first = make_pipeline(repo=repo, checkpointer=saver)
+    view = first.start("Login page returns 500", "Users get a 500 after a password reset.")
+    before = len(repo.audit(view.run_id))
+    assert before > 0
+
+    restarted = make_pipeline(repo=repo, checkpointer=saver)
+    restarted.view(view.run_id)
+    assert len(repo.audit(view.run_id)) == before
+
+    view = restarted.resume(view.run_id, "sukhdev", True, "ok", role="senior")
+    persisted = repo.audit(view.run_id)
+    assert len(persisted) == len(view.audit)
+    assert [e.action for e in persisted].count("triaged") == 1
+
+
 def test_committed_record_carries_status_stage_and_state():
     p = make_pipeline()
     view = p.start("Login page returns 500", "Users get a 500 after a password reset.")
