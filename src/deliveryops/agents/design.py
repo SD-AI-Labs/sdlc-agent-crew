@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
 from ..llm.base import LLM
-from .base import complete_structured, confidence, require, str_list
+from .base import AgentOutputError, complete_structured, confidence, require, str_list
 
 SYSTEM = """You are a senior engineer producing a technical design for a small change.
 Return ONLY a JSON object with keys:
@@ -49,7 +49,7 @@ def validate(raw: dict, citations: list[str]) -> DesignResult:
     require(raw, "design", "approach", "components", "test_plan", "confidence")
     approach = raw["approach"]
     if not isinstance(approach, str) or len(approach.strip()) < 10:
-        raise ValueError("design: approach must be a sentence or more")
+        raise AgentOutputError("design: approach must be a sentence or more")
     return DesignResult(
         approach=approach.strip(),
         components=str_list(raw["components"], "design", "components"),

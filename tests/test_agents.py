@@ -143,6 +143,16 @@ def test_design_agent_rejects_too_short_approach():
         DesignAgent(ScriptedLLM(json.dumps(payload))).run("t", ["r"])
 
 
+def test_design_validate_raises_the_shared_output_error():
+    # validate() used to raise a plain ValueError for a short approach while every
+    # other contract check raises AgentOutputError; the error type is now uniform.
+    from deliveryops.agents.design import validate as validate_design
+
+    raw = {**DESIGN_PAYLOAD, "approach": "fix"}
+    with pytest.raises(AgentOutputError, match="approach"):
+        validate_design(raw, [])
+
+
 def test_fake_llm_answers_every_agent_kind():
     from deliveryops.agents.code import SYSTEM as CODE_SYSTEM
     from deliveryops.agents.design import SYSTEM as DESIGN_SYSTEM

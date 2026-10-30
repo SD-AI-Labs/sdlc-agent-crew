@@ -94,7 +94,13 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
             title, description = found.title, found.description
         if not title or not description or len(title) < 3 or len(description) < 3:
             raise HTTPException(422, "title and description are required (min 3 chars)")
-        view = pipe.start(title, description)
+        try:
+            view = pipe.start(title, description)
+        except Exception as e:
+            # Stage failures are handled inside the pipeline (the run goes to
+            # 'failed'); anything escaping to here is infrastructure, reported as a
+            # structured 502 rather than a bare 500.
+            raise HTTPException(502, f"pipeline failed to start the run: {e}") from e
         return view.to_dict()
 
     @app.get("/runs")
@@ -131,6 +137,8 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
             raise HTTPException(409, str(e)) from e
         except InsufficientAuthority as e:
             raise HTTPException(403, str(e)) from e
+        except Exception as e:
+            raise HTTPException(502, f"pipeline failed to resume the run: {e}") from e
 
     @app.get("/runs/{run_id}/patch", response_class=PlainTextResponse)
     def get_patch(run_id: str) -> str:

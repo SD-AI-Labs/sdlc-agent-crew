@@ -110,6 +110,26 @@ def test_patch_endpoint_returns_the_diff_once_approved(client):
     assert r.status_code == 200 and r.text.startswith("--- a/")
 
 
+def test_transport_failure_returns_a_failed_run_not_a_bare_500():
+    from .conftest import (
+        CODE_PAYLOAD,
+        DESIGN_PAYLOAD,
+        REVIEW_PAYLOAD,
+        RaisingLLM,
+        triage_payload,
+    )
+
+    p = make_pipeline(llm=RaisingLLM(
+        "intake", intake=triage_payload(), design=DESIGN_PAYLOAD,
+        code=CODE_PAYLOAD, review=REVIEW_PAYLOAD,
+    ))
+    failing_client = TestClient(create_app(p))
+    r = failing_client.post("/tickets", json=TICKET)
+    assert r.status_code == 201, r.text
+    assert r.json()["status"] == "failed"
+    assert r.json()["errors"][0]["stage"] == "intake"
+
+
 def test_ticket_validation_rejects_empty_bodies(client):
     assert client.post("/tickets", json={"title": "ab"}).status_code == 422
 

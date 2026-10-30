@@ -5,7 +5,23 @@ import pytest
 
 from deliveryops.orchestrator.pipeline import GateClosed, InsufficientAuthority, RunNotFound
 
-from .conftest import ScriptedLLM, make_pipeline, triage_payload
+from .conftest import (
+    CODE_PAYLOAD,
+    DESIGN_PAYLOAD,
+    REVIEW_PAYLOAD,
+    RaisingLLM,
+    ScriptedLLM,
+    make_pipeline,
+    triage_payload,
+)
+
+
+def _raising_pipeline(fail_kind: str):
+    return make_pipeline(llm=RaisingLLM(
+        fail_kind,
+        intake=triage_payload(), design=DESIGN_PAYLOAD,
+        code=CODE_PAYLOAD, review=REVIEW_PAYLOAD,
+    ))
 
 TICKET = "Login page returns 500 after password reset"
 BODY = "Users who change their password get a 500 error when they log in again."
@@ -77,6 +93,29 @@ def test_malformed_triage_fails_the_run_without_opening_a_gate():
     view = p.start(TICKET, BODY)
     assert view.status == "failed" and view.awaiting is None
     assert view.errors and view.errors[0]["stage"] == "intake"
+
+
+def test_transport_error_at_intake_fails_the_run_instead_of_stranding_it():
+    p = _raising_pipeline("intake")
+    view = p.start(TICKET, BODY)
+    assert view.status == "failed" and view.awaiting is None
+    assert view.errors and view.errors[0]["stage"] == "intake"
+    assert "provider unreachable" in view.errors[0]["error"]
+    assert "failed" in [a.action for a in p.repo.audit(view.run_id)]
+    assert p.repo.get(view.run_id).status == "failed"
+    spans = p.tracer.spans(view.run_id)
+    assert any(not s.ok for s in spans), "a failure span must be recorded"
+    assert p.tracer.metrics()["by_stage"]["intake"]["error_rate"] == 1.0
+
+
+def test_transport_error_mid_run_fails_the_run_at_that_stage():
+    p = _raising_pipeline("design")
+    view = p.start(TICKET, BODY)
+    assert view.status == "awaiting_approval"
+    view = p.resume(view.run_id, "sukhdev", True, "ok", role="senior")
+    assert view.status == "failed" and view.stage == "design"
+    assert view.errors and view.errors[0]["stage"] == "design"
+    assert any(not s.ok and s.stage == "design" for s in p.tracer.spans(view.run_id))
 
 
 def test_failed_run_writes_an_audit_entry():

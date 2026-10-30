@@ -13,7 +13,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from ..agents.base import AgentOutputError
 from ..agents.code import CodeAgent
 from ..agents.design import DesignAgent
 from ..agents.intake import IntakeAgent
@@ -60,7 +59,7 @@ class StageNodes:
             return None
         spent = float(state.get("spent_usd", 0.0))
         if spent >= cap:
-            return self._failed(stage, RuntimeError(
+            return self._failed(state["run_id"], stage, RuntimeError(
                 f"run budget exceeded: ${spent:.4f} >= cap ${cap:.2f} "
                 "(DELIVERYOPS_MAX_RUN_COST_USD)"))
         return None
@@ -70,8 +69,8 @@ class StageNodes:
             return failed
         try:
             result = self.intake.run(state["title"], state["description"])
-        except AgentOutputError as e:
-            return self._failed("intake", e)
+        except Exception as e:
+            return self._failed(state["run_id"], "intake", e)
         span = self.tracer.record(state["run_id"], "intake", "intake", result.meta)
         return {
             "triage": result.to_dict(),
@@ -87,8 +86,8 @@ class StageNodes:
         triage = state.get("triage") or {}
         try:
             result = self.design.run(state["title"], triage.get("requirements", []))
-        except (AgentOutputError, ValueError) as e:
-            return self._failed("design", e)
+        except Exception as e:
+            return self._failed(state["run_id"], "design", e)
         span = self.tracer.record(state["run_id"], "design", "design", result.meta)
         return {
             "design": result.to_dict(),
@@ -108,8 +107,8 @@ class StageNodes:
             result = self.code.run(
                 state["title"], design.get("approach", ""), triage.get("requirements", [])
             )
-        except AgentOutputError as e:
-            return self._failed("code", e)
+        except Exception as e:
+            return self._failed(state["run_id"], "code", e)
         span = self.tracer.record(state["run_id"], "code", "code", result.meta)
         return {
             "patch": result.to_dict(),
@@ -127,8 +126,8 @@ class StageNodes:
         design = state.get("design") or {}
         try:
             result = self.review.run(patch.get("diff", ""), design.get("approach", ""))
-        except AgentOutputError as e:
-            return self._failed("review", e)
+        except Exception as e:
+            return self._failed(state["run_id"], "review", e)
         span = self.tracer.record(state["run_id"], "review", "review", result.meta)
         return {
             "review": result.to_dict(),
@@ -262,7 +261,13 @@ class StageNodes:
         updates["status"] = "running" if approve else "rejected"
         return updates
 
-    def _failed(self, stage: str, error: Exception) -> dict:
+    def _failed(self, run_id: str, stage: str, error: Exception) -> dict:
+        # Every stage failure lands here - contract violations (AgentOutputError) and
+        # transport/provider failures (timeouts, 5xx, connection errors) alike. The run
+        # transitions to `failed` with an audit entry, and the tracer gets a failure
+        # span so /metrics error_rate can see it; before, a transport error escaped
+        # invoke() entirely and stranded the run in 'submitted' behind a bare 500.
+        self.tracer.record(run_id, stage, stage, {}, ok=False, error=str(error))
         return {
             "status": "failed",
             "stage": stage,
