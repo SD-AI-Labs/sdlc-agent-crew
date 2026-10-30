@@ -6,6 +6,9 @@ An agentic software-delivery pipeline: a ticket moves through **intake triage, t
 proposed code change and review**, a human owns **every** gate, and **passing evals is what allows a
 change to ship**.
 
+> **v1.0.0** — the first frozen release: the four-gate pipeline, eval gate, guardrails, MCP layer,
+> Jira/GitHub adapters, and the local/GCP/AWS deploy targets below. See `CHANGELOG.md`.
+>
 > Status: working end to end on the offline model (`DELIVERYOPS_LLM=fake`), and on Claude when a key
 > is present. 224 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
 > gate-has-teeth check). Intake can pull real Jira Cloud tickets and the code agent can ground its
@@ -179,7 +182,9 @@ cp .env.example .env
 docker compose up --build      # db (pgvector) + knowledge ingest + api + outbox worker
 ```
 
-- `db`: Postgres 16 with pgvector, schema applied on first boot (`db/schema.sql`).
+- `db`: Postgres 16 with pgvector.
+- `migrate`: one-shot `deliveryops-migrate` - version-tracked schema plus the LangGraph
+  checkpointer tables; `api` and `worker` wait for it to complete.
 - `knowledge`: one-shot ingestion of the process library into `knowledge_chunks`.
 - `api`: FastAPI on :8000, `DELIVERYOPS_RETRIEVER=hybrid` (lexical + vector, RRF) and
   `DELIVERYOPS_CHECKPOINTER=postgres` when the database is present, so in-flight runs survive an
@@ -288,6 +293,7 @@ tests/           224 tests
 | 0007 | Jira and GitHub are env-configured adapters; the mock stays the default |
 | 0008 | Model-independent LLM layer; full agent loops evaluated and deferred |
 | 0009 | Guardrails for untrusted external content |
+| 0010 | Retrieval credibility: real embeddings, hybrid fusion, measured recall gates |
 
 ## Known limitations
 

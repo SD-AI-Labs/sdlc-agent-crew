@@ -506,6 +506,24 @@ is hash-only and reconciles trivially at push time), and a pre-rewrite bundle ba
 kept outside the repo until the rewritten history is pushed. `terraform init` re-downloads
 providers on demand; nothing functional changed.
 
+## v1.0.0 freeze (2026-10-30)
+
+The tree at tag `v1.0.0` is the first frozen release. This pass was documentation and
+release mechanics only - no behaviour changes: `pyproject.toml` and the API version go
+0.2.0 -> 1.0.0, `CHANGELOG.md` added, README refreshed (release banner, the migrate
+service in the compose layout, ADR 0010 added to the decisions table), and
+`docs/ARCHITECTURE.md` corrected where it had drifted from the code (pilot token auth in
+the "deliberately does not do" list; LLM transport failures in the failure-semantics
+table). Everything in the earlier sections stands as the record of what was executed;
+the freeze verification is: `uv run pytest -q` (224 passed), `ruff` clean, `vulture`
+clean, `deliveryops-eval --baseline-check` OK, and a live local run of the API + worker
+with a ticket walked through all four gates to `approved` and its patch released.
+
+Frozen knowing the following are open, by decision rather than by accident: the
+real-model eval has never been run (needs `ANTHROPIC_API_KEY`); neither cloud target has
+been applied to a real account; the eval gate covers intake only; the diagnosis stage
+(logs / change-history / repo-search tools) discussed for v2 does not exist yet.
+
 ## Reproduce
 
 ```bash

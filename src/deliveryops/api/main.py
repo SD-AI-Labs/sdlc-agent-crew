@@ -91,7 +91,7 @@ def _load_tokens() -> dict[str, dict]:
 
 
 def create_app(pipeline: Pipeline | None = None) -> FastAPI:
-    app = FastAPI(title="DeliveryOps Agents", version="0.2.0")
+    app = FastAPI(title="DeliveryOps Agents", version="1.0.0")
     pipe = pipeline or get_pipeline()
     tokens = _load_tokens()
     protect_reads = os.getenv("DELIVERYOPS_AUTH_PROTECT_READS", "") == "1"
