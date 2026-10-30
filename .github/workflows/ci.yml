@@ -32,9 +32,12 @@ jobs:
           push: false
 
   terraform:
-    name: terraform fmt and validate
+    name: terraform fmt and validate (${{ matrix.target }})
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [gcp, aws]
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
@@ -43,8 +46,8 @@ jobs:
       - run: terraform fmt -check -recursive deploy/terraform
       # -backend=false: validate the configuration without touching remote
       # state (CI has no business holding state credentials).
-      - run: terraform -chdir=deploy/terraform/gcp init -backend=false
-      - run: terraform -chdir=deploy/terraform/gcp validate
+      - run: terraform -chdir=deploy/terraform/${{ matrix.target }} init -backend=false
+      - run: terraform -chdir=deploy/terraform/${{ matrix.target }} validate
 
   gate-self-check:
     name: eval gate has teeth
