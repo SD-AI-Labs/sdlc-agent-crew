@@ -14,6 +14,18 @@ services:
       interval: 3s
       retries: 20
 
+  migrate:
+    # One-shot: applies schema.sql (version-tracked) and sets up the checkpointer
+    # tables before api/worker start. The db service's initdb mount also applies
+    # schema.sql on first boot - both paths are idempotent; migrate is the one
+    # that records the version and covers databases that already exist.
+    build: .
+    command: ["deliveryops-migrate"]
+    environment:
+      DATABASE_URL: postgresql://deliveryops:${POSTGRES_PASSWORD:-deliveryops}@db:5432/deliveryops
+    depends_on:
+      db: {condition: service_healthy}
+
   api:
     build: .
     environment:
@@ -33,6 +45,8 @@ services:
     ports: ["8000:8000"]
     depends_on:
       db: {condition: service_healthy}
+      migrate:
+        condition: service_completed_successfully
       knowledge:
         condition: service_completed_successfully
 
@@ -53,6 +67,8 @@ services:
       DATABASE_URL: postgresql://deliveryops:${POSTGRES_PASSWORD:-deliveryops}@db:5432/deliveryops
     depends_on:
       db: {condition: service_healthy}
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:
