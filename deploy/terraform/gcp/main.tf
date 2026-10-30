@@ -144,10 +144,12 @@ resource "google_secret_manager_secret_iam_member" "worker_read_db_url" {
 
 locals {
   shared_env = {
-    DELIVERYOPS_RETRIEVER    = "pgvector"
-    DELIVERYOPS_CHECKPOINTER = "postgres"
+    DELIVERYOPS_DEPLOY_TARGET = "gcp"
+    DELIVERYOPS_RETRIEVER     = "pgvector"
+    DELIVERYOPS_CHECKPOINTER  = "postgres"
     # Model layer (ADR 0008): 'chat' + provider/model env, never a provider name in
-    # DELIVERYOPS_LLM. Set llm_mode = "fake" only for an offline dev deploy.
+    # DELIVERYOPS_LLM. Set llm_mode = "fake" only for an offline dev deploy - on a
+    # cloud target config validation then also requires DELIVERYOPS_ALLOW_FAKE_LLM=1.
     DELIVERYOPS_LLM         = var.llm_mode
     DELIVERYOPS_PROVIDER    = var.llm_provider
     DELIVERYOPS_MODEL       = var.llm_model
@@ -244,6 +246,10 @@ resource "google_cloud_run_v2_service" "worker" {
       volume_mounts {
         name       = "cloudsql"
         mount_path = "/cloudsql"
+      }
+      env {
+        name  = "DELIVERYOPS_DEPLOY_TARGET"
+        value = "gcp"
       }
       dynamic "env" {
         for_each = { DATABASE_URL = "database-url" }

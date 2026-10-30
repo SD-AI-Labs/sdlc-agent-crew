@@ -40,6 +40,12 @@ _PROVIDERS = {"anthropic", "openai", "google", "google_genai"}
 _EMBEDDERS = {"hash", "langchain"}
 _RETRIEVERS = {"lexical", "pgvector", "hybrid"}
 _CHECKPOINTERS = {"", "memory", "postgres"}
+# Where this process is running: deploy/run.sh's targets, set by the terraform
+# modules (deploy/terraform/<target>) and docker-compose (local). Cloud targets
+# carry hard rules (below) because a cloud deploy that silently degrades to
+# in-memory state or the offline model is worse than one that refuses to boot.
+_DEPLOY_TARGETS = {"local", "gcp", "aws"}
+_CLOUD_TARGETS = {"gcp", "aws"}
 
 
 class ConfigError(RuntimeError):
@@ -64,6 +70,13 @@ def validate_config(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """
     env = os.environ if env is None else env
     errors: list[str] = []
+    warnings: list[str] = []
+
+    target = env.get("DELIVERYOPS_DEPLOY_TARGET", "local").lower()
+    if target not in _DEPLOY_TARGETS:
+        errors.append(
+            f"DELIVERYOPS_DEPLOY_TARGET {target!r} is not one of "
+            f"{sorted(_DEPLOY_TARGETS)}")
 
     mode = env.get("DELIVERYOPS_LLM", "fake").lower()
     if mode not in _LLM_MODES:
@@ -110,10 +123,34 @@ def validate_config(env: Mapping[str, str] | None = None) -> dict[str, str]:
     _check_number(env, "DELIVERYOPS_DB_POOL_MIN", int, errors)
     _check_number(env, "DELIVERYOPS_DB_POOL_MAX", int, errors)
 
+    # Cloud targets: the deployment is database-backed and model-backed by
+    # definition. Anything less is a local demo wearing a cloud costume, so it
+    # refuses to boot - except the fake model behind an explicit override,
+    # which is how an offline smoke deploy is run on purpose.
+    if target in _CLOUD_TARGETS:
+        if not dsn:
+            errors.append(
+                f"DELIVERYOPS_DEPLOY_TARGET={target} requires DATABASE_URL "
+                "(cloud runs keep state in Postgres, not process memory)")
+        if mode == "fake" and env.get("DELIVERYOPS_ALLOW_FAKE_LLM", "") != "1":
+            errors.append(
+                f"DELIVERYOPS_DEPLOY_TARGET={target} with DELIVERYOPS_LLM=fake "
+                "would serve the offline keyword model; set a real model or "
+                "DELIVERYOPS_ALLOW_FAKE_LLM=1 for a deliberate smoke deploy")
+        if not env.get("DELIVERYOPS_API_TOKENS"):
+            warnings.append(
+                f"DELIVERYOPS_API_TOKENS is unset on target {target!r}: gate "
+                "decisions will accept a caller-asserted approver and role. "
+                "That is acceptable only behind an authenticating front door "
+                "(IAP, an ALB with OIDC, SSO) - otherwise set API tokens.")
+
+    for warning in warnings:
+        log.warning("%s", warning)
     if errors:
         raise ConfigError("invalid configuration: " + "; ".join(errors))
 
     summary = {
+        "deploy_target": target,
         "llm": mode if mode == "fake" else (
             f"{mode}:{provider}/{env.get('DELIVERYOPS_MODEL', 'claude-sonnet-4-6')}"),
         "retriever": retriever,

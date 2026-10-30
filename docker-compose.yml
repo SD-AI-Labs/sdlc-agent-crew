@@ -29,6 +29,7 @@ services:
   api:
     build: .
     environment:
+      DELIVERYOPS_DEPLOY_TARGET: local
       DELIVERYOPS_LLM: ${DELIVERYOPS_LLM:-fake}
       DELIVERYOPS_MODEL: ${DELIVERYOPS_MODEL:-claude-sonnet-4-6}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -64,6 +65,7 @@ services:
     build: .
     command: ["deliveryops-worker"]
     environment:
+      DELIVERYOPS_DEPLOY_TARGET: local
       DATABASE_URL: postgresql://deliveryops:${POSTGRES_PASSWORD:-deliveryops}@db:5432/deliveryops
     depends_on:
       db: {condition: service_healthy}
