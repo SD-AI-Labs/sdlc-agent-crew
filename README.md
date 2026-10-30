@@ -7,7 +7,7 @@ proposed code change and review**, a human owns **every** gate, and **passing ev
 change to ship**.
 
 > Status: working end to end on the offline model (`DELIVERYOPS_LLM=fake`), and on Claude when a key
-> is present. 144 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
+> is present. 173 tests, ruff-clean, vulture-clean, CI green on `main` (lint, tests, and the
 > gate-has-teeth check). Intake can pull real Jira Cloud tickets and the code agent can ground its
 > diff in a real GitHub repo (both env-configured, both read-only). With `DATABASE_URL` set, run
 > state is in the Postgres checkpointer, so an API restart no longer loses in-flight runs.
@@ -58,7 +58,7 @@ The per-run report (`/runs/{id}/summary`) is the one-page "what the agent did an
 
 ```bash
 uv sync --extra dev --extra anthropic     # uv owns the venv and the lockfile (Python pinned in .python-version)
-uv run pytest -q                          # 144 tests, offline, no API key
+uv run pytest -q                          # 173 tests, offline, no API key
 uv run deliveryops-eval                   # eval gate on the offline baseline (expected: FAIL)
 uv run vulture                            # dead-code check (config in pyproject.toml)
 uv run deliveryops-api                    # http://localhost:8000/docs
@@ -244,8 +244,8 @@ src/deliveryops/
   api/           FastAPI app
 evals/golden/    golden tickets
 deploy/          Cloud Run + Cloud SQL: terraform and runbook
-docs/            ARCHITECTURE.md, STATUS.md, adr/ (nine decisions)
-tests/           144 tests
+docs/            ARCHITECTURE.md, STATUS.md, adr/ (ten decisions)
+tests/           173 tests
 ```
 
 ## Deeper reading

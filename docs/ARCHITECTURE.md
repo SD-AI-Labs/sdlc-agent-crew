@@ -130,7 +130,7 @@ Resume carries `{approver, approve, comment, role}`. If the gate is escalated, a
 | `agent_calls` | per-call telemetry: model, tokens, latency, cost, ok | FK to `runs` — the run row is written before the first span |
 | `escalations` | escalation queue with risk and reasons | one row per escalated stage, written when the gate opens |
 | `outbox` | durable handoff events | unique on `(run_id, type, stage)`; `delivered_at` set by the worker |
-| `knowledge_chunks` | process docs + 1024-dim embedding | unique on `source`; ivfflat cosine index |
+| `knowledge_chunks` | process docs + dimensionless embedding, namespaced by `embedder` | unique on `(source, embedder)`; HNSW cosine index |
 
 Cost is computed at write time from `llm/pricing.py`; an unknown model is reported as unpriced
 rather than silently costed at zero.
