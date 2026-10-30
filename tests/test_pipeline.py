@@ -172,6 +172,54 @@ def test_one_escalation_row_per_escalated_stage():
     assert len(stages) == len(set(stages)), stages
 
 
+def test_duplicate_decision_with_the_same_idempotency_key_applies_once(pipeline):
+    view = pipeline.start(TICKET, BODY)
+    first = pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior",
+                            idempotency_key="req-1")
+    assert first.awaiting["stage"] == "design"
+    # A retry of the same request (client never saw the first response) must not
+    # resume the graph again or record a second decision.
+    again = pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior",
+                            idempotency_key="req-1")
+    assert again.awaiting["stage"] == "design"
+    assert [d["stage"] for d in again.decisions] == ["intake"]
+
+
+def test_decision_for_a_gate_that_already_closed_is_gate_closed(pipeline):
+    view = pipeline.start(TICKET, BODY)
+    pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior", stage="intake")
+    # The run has moved to the design gate; a second decision aimed at intake must
+    # not silently land on design.
+    with pytest.raises(GateClosed):
+        pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior", stage="intake")
+
+
+def test_concurrent_decisions_at_one_gate_only_one_takes_effect(pipeline):
+    import threading
+
+    view = pipeline.start(TICKET, BODY)
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def decide():
+        barrier.wait()
+        try:
+            pipeline.resume(view.run_id, "sukhdev", True, "ok", role="senior", stage="intake")
+            outcomes.append("ok")
+        except GateClosed:
+            outcomes.append("closed")
+
+    threads = [threading.Thread(target=decide) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(outcomes) == ["closed", "ok"]
+    final = pipeline.view(view.run_id)
+    assert [d["stage"] for d in final.decisions] == ["intake"]
+    assert final.awaiting["stage"] == "design"
+
+
 def test_cost_and_latency_are_tracked_per_run(pipeline):
     view = pipeline.start(TICKET, BODY)
     metrics = pipeline.tracer.metrics()

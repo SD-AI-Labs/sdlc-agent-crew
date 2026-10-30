@@ -42,6 +42,31 @@ def test_decision_endpoint_advances_the_run(client):
     assert r.json()["stage"] == "design"
 
 
+def test_decision_retry_with_idempotency_key_does_not_advance_twice(client):
+    run = _submit(client)
+    headers = {"Idempotency-Key": "dec-1"}
+    r = client.post(f"/runs/{run['run_id']}/decision",
+                    json={"approver": "sukhdev", "approve": True, "role": "senior"},
+                    headers=headers)
+    assert r.status_code == 200 and r.json()["awaiting"]["stage"] == "design"
+    r = client.post(f"/runs/{run['run_id']}/decision",
+                    json={"approver": "sukhdev", "approve": True, "role": "senior"},
+                    headers=headers)
+    assert r.status_code == 200 and r.json()["awaiting"]["stage"] == "design"
+    assert [d["stage"] for d in r.json()["decisions"]] == ["intake"]
+
+
+def test_decision_naming_a_closed_gate_stage_is_409(client):
+    run = _submit(client)
+    client.post(f"/runs/{run['run_id']}/decision",
+                json={"approver": "sukhdev", "approve": True, "role": "senior",
+                      "stage": "intake"})
+    r = client.post(f"/runs/{run['run_id']}/decision",
+                    json={"approver": "sukhdev", "approve": True, "role": "senior",
+                          "stage": "intake"})
+    assert r.status_code == 409
+
+
 def test_second_decision_on_a_closed_gate_is_409(client):
     run = _submit(client)
     client.post(f"/runs/{run['run_id']}/decision", json={"approver": "a", "approve": False})

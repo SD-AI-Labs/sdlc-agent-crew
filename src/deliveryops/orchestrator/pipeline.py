@@ -4,6 +4,7 @@ Everything LangGraph-specific (thread ids, interrupts, checkpoint state) stays i
 """
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -85,6 +86,11 @@ class Pipeline:
         )
         self.graph = build_graph(self.nodes, checkpointer)
         self._persisted_audit: dict[str, int] = {}
+        # One lock per run serialises gate decisions: a decision is check-then-act
+        # (read the open gate, then resume the graph), so two concurrent calls for the
+        # same run must not interleave or both would resume the same interrupt.
+        self._locks_guard = threading.Lock()
+        self._run_locks: dict[str, threading.Lock] = {}
 
     # ---------- public API ----------
 
@@ -112,17 +118,41 @@ class Pipeline:
         return self.view(rid)
 
     def resume(self, run_id: str, approver: str, approve: bool, comment: str = "",
-               role: str = "engineer") -> RunView:
-        view = self.view(run_id)
-        if view.awaiting is None:
-            raise GateClosed(f"run {run_id} is '{view.status}', not waiting at a gate")
-        escalated = bool((view.awaiting or {}).get("escalate"))
-        if approve and escalated and role.lower() not in SENIOR_ROLES:
-            raise InsufficientAuthority(
-                f"stage '{view.stage}' is escalated; approver role '{role}' cannot clear it"
+               role: str = "engineer", stage: str | None = None,
+               idempotency_key: str | None = None) -> RunView:
+        """Answer the gate a run is waiting at.
+
+        The whole check-and-resume runs under the run's lock, so concurrent decisions
+        cannot both resume the same gate: the loser finds the gate moved on and gets
+        GateClosed. `stage`, when supplied, is the caller's claim about which gate it
+        is answering - a mismatch is GateClosed rather than a decision silently landing
+        on the next gate. `idempotency_key` makes retries safe: a key already recorded
+        on a decision for this run returns the run as it now stands instead of
+        resuming the graph again.
+        """
+        with self._lock_for(run_id):
+            view = self.view(run_id)
+            if idempotency_key and any(
+                d.get("idempotency_key") == idempotency_key for d in view.decisions
+            ):
+                return view
+            if view.awaiting is None:
+                raise GateClosed(f"run {run_id} is '{view.status}', not waiting at a gate")
+            if stage is not None and stage != view.awaiting.get("stage"):
+                raise GateClosed(
+                    f"run {run_id} is waiting at the '{view.awaiting.get('stage')}' gate, "
+                    f"not '{stage}'"
+                )
+            escalated = bool((view.awaiting or {}).get("escalate"))
+            if approve and escalated and role.lower() not in SENIOR_ROLES:
+                raise InsufficientAuthority(
+                    f"stage '{view.stage}' is escalated; approver role '{role}' cannot clear it"
+                )
+            self.graph.invoke(
+                resume_command(approver, approve, comment, role, idempotency_key),
+                self._cfg(run_id),
             )
-        self.graph.invoke(resume_command(approver, approve, comment, role), self._cfg(run_id))
-        return self.view(run_id)
+            return self.view(run_id)
 
     def view(self, run_id: str) -> RunView:
         cfg = self._cfg(run_id)
@@ -168,6 +198,10 @@ class Pipeline:
         return (view.patch or {}).get("diff", "")
 
     # ---------- internals ----------
+
+    def _lock_for(self, run_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._run_locks.setdefault(run_id, threading.Lock())
 
     def _cfg(self, run_id: str) -> dict:
         return {"configurable": {"thread_id": run_id}}

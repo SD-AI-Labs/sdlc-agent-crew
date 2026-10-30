@@ -245,6 +245,10 @@ class StageNodes:
             "reasons": list(decision.reasons),
             "ts": time.time(),
         }
+        if resume.get("idempotency_key"):
+            # Recorded on the decision so a retried request can be recognised as a
+            # duplicate (pipeline.resume checks this before resuming again).
+            entry["idempotency_key"] = str(resume["idempotency_key"])
         audit_entry = audit(
             f"human:{entry['approver']}", "approved" if approve else "rejected",
             stage=stage, comment=entry["comment"], risk=entry["risk"],
@@ -302,6 +306,9 @@ def build_graph(nodes: StageNodes, checkpointer=None):
     return g.compile(checkpointer=checkpointer or InMemorySaver())
 
 
-def resume_command(approver: str, approve: bool, comment: str = "", role: str = "engineer"):
-    return Command(resume={"approver": approver, "approve": approve, "comment": comment,
-                           "role": role})
+def resume_command(approver: str, approve: bool, comment: str = "", role: str = "engineer",
+                   idempotency_key: str | None = None):
+    payload = {"approver": approver, "approve": approve, "comment": comment, "role": role}
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
+    return Command(resume=payload)

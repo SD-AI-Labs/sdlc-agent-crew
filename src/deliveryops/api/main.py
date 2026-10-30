@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -59,6 +59,9 @@ class DecisionIn(BaseModel):
     approve: bool
     comment: str = ""
     role: str = "engineer"
+    # Optional: the gate the caller believes it is answering. A mismatch with the gate
+    # actually open is a 409, so a slow or duplicated request cannot land on the next gate.
+    stage: str | None = None
 
 
 def create_app(pipeline: Pipeline | None = None) -> FastAPI:
@@ -116,10 +119,12 @@ def create_app(pipeline: Pipeline | None = None) -> FastAPI:
             raise HTTPException(404, "run not found") from e
 
     @app.post("/runs/{run_id}/decision")
-    def decide(run_id: str, body: DecisionIn) -> dict:
+    def decide(run_id: str, body: DecisionIn,
+               idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> dict:
         try:
             return pipe.resume(run_id, body.approver, body.approve, body.comment,
-                               body.role).to_dict()
+                               body.role, stage=body.stage,
+                               idempotency_key=idempotency_key).to_dict()
         except RunNotFound as e:
             raise HTTPException(404, "run not found") from e
         except GateClosed as e:
